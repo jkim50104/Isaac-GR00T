@@ -3,8 +3,11 @@
 conda create -n gr00t python=3.10 -y
 conda activate gr00t
 conda install -c conda-forge git-lfs
-git clone https://github.com/NVIDIA/Isaac-GR00T
+git clone --recurse-submodules https://github.com/NVIDIA/Isaac-GR00T
 cd Isaac-GR00T
+
+# If you've already cloned without submodules, initialize them separately:
+# git submodule update --init --recursive
 
 conda install nvidia/label/cuda-12.4.1::cuda -c nvidia/label/cuda-12.4.1
 
