@@ -3,13 +3,13 @@
 conda create -n gr00t python=3.10 -y
 conda activate gr00t
 conda install -c conda-forge git-lfs
-git clone --recurse-submodules https://github.com/NVIDIA/Isaac-GR00T
+git clone --recurse-submodules https://github.com/jkim50104/Isaac-GR00T
 cd Isaac-GR00T
 
 # If you've already cloned without submodules, initialize them separately:
 # git submodule update --init --recursive
 
-conda install nvidia/label/cuda-12.4.1::cuda -c nvidia/label/cuda-12.4.1
+conda install nvidia/label/cuda-12.4.1::cuda -c nvidia/label/cuda-12.4.1 -y
 
 pip install uv
 uv sync --python 3.10
@@ -20,3 +20,7 @@ uv pip install -e .
 uv pip install torch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 --index-url https://download.pytorch.org/whl/cu124
 uv pip uninstall flash-attn
 pip install --no-build-isolation flash-attn==2.7.4.post1
+
+# for demo data inference. Pytorch related pacackges compatible version list: https://pytorch.kr/get-started/compatibility/
+pip install torchcodec==0.1.1
+# conda install -c conda-forge ffmpeg

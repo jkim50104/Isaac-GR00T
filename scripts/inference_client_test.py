@@ -26,6 +26,8 @@ from typing import Any, Dict
 from abc import ABC, abstractmethod
 from gr00t.data.types import ModalityConfig
 
+from gr00t.policy.server_client import PolicyClient
+
 @dataclass
 class ArgsConfig:
     """Command line arguments for the inference service."""
@@ -145,7 +147,7 @@ class RobotInferenceClient(BaseInferenceClient, BasePolicy):
         super().__init__(host=host, port=port, api_token=api_token)
 
     def get_action(self, observations: Dict[str, Any]) -> Dict[str, Any]:
-        return self.call_endpoint("get_action", observations)
+        return self.call_endpoint("get_action", {"observation": observations, "options": None})
 
     def get_modality_config(self) -> Dict[str, ModalityConfig]:
         return self.call_endpoint("get_modality_config", requires_input=False)
@@ -157,14 +159,16 @@ def _example_zmq_client_call(obs: dict, host: str, port: int, api_token: str):
     """
     # Original ZMQ client mode
     # Create a policy wrapper
-    policy_client = RobotInferenceClient(host=host, port=port, api_token=api_token)
+    # policy_client = RobotInferenceClient(host=host, port=port, api_token=api_token)
+    policy_client = PolicyClient(host=host, port=port, api_token=api_token)
 
     print("Available modality config available:")
     modality_configs = policy_client.get_modality_config()
     print(modality_configs.keys())
-
+    
     time_start = time.time()
-    action = policy_client.get_action(obs)
+    # action = policy_client.get_action(obs)
+    action = policy_client._get_action(obs)
     print(f"Total time taken to get action from server: {time.time() - time_start} seconds")
     return action
 
@@ -210,22 +214,52 @@ def main(args: ArgsConfig):
     # - action: action.left_hand: (16, 6)
     # - action: action.right_hand: (16, 6)
     # - action: action.waist: (16, 3)
+    
+    # obs = {
+    #     "video.ego_view_bg_crop_pad_res256_freq20": np.random.randint(0, 256, (1, 256, 256, 3), dtype=np.uint8),
+    #     "state.left_arm": np.random.rand(1, 7),
+    #     "state.right_arm": np.random.rand(1, 7),
+    #     "state.left_hand": np.random.rand(1, 6),
+    #     "state.right_hand": np.random.rand(1, 6),
+    #     "state.waist": np.random.rand(1, 3),
+    #     "annotation.human.action.task_description": ["do your thing!"],
+    # }
+    
     obs = {
-        "video.ego_view_bg_crop_pad_res256_freq20": np.random.randint(0, 256, (1, 256, 256, 3), dtype=np.uint8),
-        "state.left_arm": np.random.rand(1, 7),
-        "state.right_arm": np.random.rand(1, 7),
-        "state.left_hand": np.random.rand(1, 6),
-        "state.right_hand": np.random.rand(1, 6),
-        "state.waist": np.random.rand(1, 3),
-        "annotation.human.action.task_description": ["do your thing!"],
+        "video": {
+            # (B=1, T=1, H, W, C)
+            "ego_view_bg_crop_pad_res256_freq20": np.stack(
+                [np.random.randint(0, 256, (256, 256, 3), dtype=np.uint8)]
+            )[None],
+        },
+        "state": {
+            # (B=1, T=1, D)
+            "left_arm": np.random.rand(7).astype(np.float32)[None, None, :],
+            "right_arm": np.random.rand(7).astype(np.float32)[None, None, :],
+            "left_hand": np.random.rand(6).astype(np.float32)[None, None, :],
+            "right_hand": np.random.rand(6).astype(np.float32)[None, None, :],
+            "waist": np.random.rand(3).astype(np.float32)[None, None, :],
+        },
+        "action": {
+            # (B=1, T=16, D)
+            "left_arm": np.random.rand(16, 7).astype(np.float32)[None, :, :],
+            "right_arm": np.random.rand(16, 7).astype(np.float32)[None, :, :],
+            "left_hand": np.random.rand(16, 6).astype(np.float32)[None, :, :],
+            "right_hand": np.random.rand(16, 6).astype(np.float32)[None, :, :],
+            "waist": np.random.rand(16, 3).astype(np.float32)[None, :, :],
+        },
+        "language": {
+            # keep annotation, (B=1, T=1)
+            "task": [["do your thing!"]],
+        },
     }
 
     if args.http_server:
-        action = _example_http_client_call(obs, args.host, args.port, args.api_token)
+        predicted_action, info = _example_http_client_call(obs, args.host, args.port, args.api_token)
     else:
-        action = _example_zmq_client_call(obs, args.host, args.port, args.api_token)
+        predicted_action, info = _example_zmq_client_call(obs, args.host, args.port, args.api_token)
 
-    for key, value in action.items():
+    for key, value in predicted_action.items():
         print(f"Action: {key}: {value.shape}")
 
 
