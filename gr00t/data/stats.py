@@ -25,6 +25,20 @@ from gr00t.data.state_action.pose import EndEffectorPose, JointPose
 from gr00t.data.types import ActionRepresentation, ActionType, EmbodimentTag, ModalityConfig
 from gr00t.data.utils import to_json_serializable
 
+# # Load new embodiment modality config
+# def load_modality_config(modality_config_path: str):
+#     import importlib
+#     import sys
+
+#     path = Path(modality_config_path)
+#     if path.exists() and path.suffix == ".py":
+#         sys.path.append(str(path.parent))
+#         importlib.import_module(path.stem)
+#         print(f"Loaded modality config: {path}")
+#     else:
+#         raise FileNotFoundError(f"Modality config path does not exist: {modality_config_path}")
+    
+# load_modality_config("data/ai_worker/ai_worker_config.py")
 
 LE_ROBOT_DATA_FILENAME = "data/*/*.parquet"
 LE_ROBOT_INFO_FILENAME = "meta/info.json"
@@ -249,7 +263,9 @@ def generate_rel_stats(dataset_path: Path | str, embodiment_tag: EmbodimentTag) 
 
 def main(dataset_path: Path | str, embodiment_tag: EmbodimentTag):
     generate_stats(dataset_path)
+    print(f"Generated stats for {dataset_path}")
     generate_rel_stats(dataset_path, embodiment_tag)
+    print(f"Generated relative stats for {dataset_path} with embodiment {embodiment_tag}")
 
 
 if __name__ == "__main__":

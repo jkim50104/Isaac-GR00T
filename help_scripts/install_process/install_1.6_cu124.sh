@@ -22,5 +22,5 @@ uv pip uninstall flash-attn
 pip install --no-build-isolation flash-attn==2.7.4.post1
 
 # for demo data inference. Pytorch related pacackges compatible version list: https://pytorch.kr/get-started/compatibility/
-pip install torchcodec==0.1.1
-# conda install -c conda-forge ffmpeg
+pip install torchcodec==0.1.1 # for torch 2.5.1
+# conda install -c conda-forge "ffmpeg=6.1.2"

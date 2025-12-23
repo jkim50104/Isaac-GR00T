@@ -6,6 +6,8 @@ import re
 from typing import Any
 import warnings
 
+import torchcodec # I don't know why, but if pandas(Which is in LeRobotEpisodeLoader) is imported before torchcodec, it fails
+
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
 from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
 from gr00t.data.embodiment_tags import EmbodimentTag
@@ -219,7 +221,7 @@ def evaluate_single_trajectory(
         state_keys=state_keys,
         action_keys=action_keys,
         action_horizon=action_horizon,
-        save_plot_path=save_plot_path or f"/tmp/open_loop_eval/traj_{traj_id}.jpeg",
+        save_plot_path= f"{save_plot_path}/open_loop_eval/traj_{traj_id}.jpeg",
     )
 
     return mse, mae
@@ -262,10 +264,22 @@ class ArgsConfig:
     modality_keys: list[str] | None = None
     """List of modality keys to plot. If None, plot all keys."""
 
+    log_path: str = "./output/open_loop_eval"
+    """Path to save the log file."""
 
 def main(args: ArgsConfig):
     # Set up logging
-    logging.basicConfig(level=logging.INFO)
+    log_dir = Path(args.log_path) / "open_loop_eval"
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+        handlers=[
+            logging.FileHandler(log_dir / "eval.log"),
+            logging.StreamHandler(),
+        ],
+    )
 
     # Download model checkpoint if it's an S3 path
     local_model_path = args.model_path
@@ -305,7 +319,7 @@ def main(args: ArgsConfig):
     dataset = LeRobotEpisodeLoader(
         dataset_path=args.dataset_path,
         modality_configs=modality,
-        video_backend="torchcodec",
+        video_backend="torchcodec", # decord, torchcodec
         video_backend_kwargs=None,
     )
 
