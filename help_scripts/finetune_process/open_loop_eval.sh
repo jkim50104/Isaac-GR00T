@@ -1,7 +1,7 @@
-CKPT="./output/ai_worker/checkpoint-8000"
+CKPT="./output/ai_worker_160BT/checkpoint-10000"
 
-python gr00t/eval/open_loop_eval.py \
-    --dataset-path ./data/ai_worker/ffw_sg2_rev1_clear_item \
+uv run python gr00t/eval/open_loop_eval.py \
+    --dataset-path ./data/jkim50104/ffw_sg2_rev1_clear_item \
     --embodiment-tag NEW_EMBODIMENT \
     --model-path $CKPT \
     --traj-ids 0 \

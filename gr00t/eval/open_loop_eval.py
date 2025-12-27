@@ -6,7 +6,7 @@ import re
 from typing import Any
 import warnings
 
-import torchcodec # I don't know why, but if pandas(Which is in LeRobotEpisodeLoader) is imported before torchcodec, it fails
+# import torchcodec # I don't know why, but if pandas(Which is in LeRobotEpisodeLoader) is imported before torchcodec, it fails
 
 from gr00t.data.dataset.lerobot_episode_loader import LeRobotEpisodeLoader
 from gr00t.data.dataset.sharded_single_step_dataset import extract_step_data
@@ -319,7 +319,7 @@ def main(args: ArgsConfig):
     dataset = LeRobotEpisodeLoader(
         dataset_path=args.dataset_path,
         modality_configs=modality,
-        video_backend="torchcodec", # decord, torchcodec
+        video_backend="decord", # decord, torchcodec
         video_backend_kwargs=None,
     )
 

@@ -1,5 +1,7 @@
 #!/bin/bash
 
+# sudo bash build.sh
+
 set -x
 
 image_name="gr00t-dev"
