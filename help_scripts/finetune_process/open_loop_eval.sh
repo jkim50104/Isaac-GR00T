@@ -6,7 +6,7 @@ uv run python gr00t/eval/open_loop_eval.py \
     --model-path $CKPT \
     --traj-ids 0 \
     --action-horizon 16 \
-    --steps 400 \
+    --steps 1000 \
     --modality-keys left_arm left_gripper right_arm right_gripper head lift base \
     --log-path $CKPT \
     --save_plot_path $CKPT
