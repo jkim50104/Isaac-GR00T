@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BATCH_SIZE=32 #160
+NUM_GPUS=2
+BATCH_SIZE=64 #160
 ARM_ONLY=true
 USE_WRIST=true
 ACTION_REP=REL
@@ -11,11 +12,11 @@ DATASET_PATH="./data/jkim50104/ffw_sg2_rev1_clear_item"
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
-HYPER_PARAMS="B${BATCH_SIZE}"
+HYPER_PARAMS="G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
 
 if [[ "${ARM_ONLY}" == "true" ]]; then
   CONFIG="ai_worker_config_arm_only.py"
-  HYPER_PARAMS="B${BATCH_SIZE}_AO"
+  HYPER_PARAMS="${HYPER_PARAMS}_AO"
 fi
 
 if [[ "${USE_WRIST}" == "true" ]]; then
@@ -28,16 +29,17 @@ if [[ $# -lt 1 ]]; then
   exit 1
 fi
 
-export NUM_GPUS=1
 export CUDA_VISIBLE_DEVICES="$1"
 
-python gr00t/experiment/launch_finetune.py \
+# python 
+torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
+  gr00t/experiment/launch_finetune.py \
   --base-model-path "${BASE_MODEL}" \
   --dataset-path "${DATASET_PATH}" \
   --embodiment-tag "${EMBODIMENT_TAG}" \
   --modality-config-path "./data/jkim50104/${CONFIG}" \
   --num-gpus "${NUM_GPUS}" \
-  --output-dir "./output/ai_worker_${HYPER_PARAMS}_${ACTION_REP}" \
+  --output-dir "./output/ai_worker_${HYPER_PARAMS}" \
   --save-total-limit 3 \
   --save-steps 5000 \
   --max-steps 30000 \
