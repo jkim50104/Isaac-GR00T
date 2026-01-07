@@ -219,13 +219,14 @@ def build_image_transformations_albumentations(
         max_size = image_target_size[0]
     else:
         max_size = shortest_image_edge
-
+        
     # Training transforms (using ReplayCompose for consistent augmentation across views)
     # Use SmallestMaxSize to preserve aspect ratios, with INTER_AREA for antialiasing
     train_transform_list = [
         A.SmallestMaxSize(max_size=max_size, interpolation=cv2.INTER_AREA),
         FractionalRandomCrop(crop_fraction=fraction_to_use),
         A.SmallestMaxSize(max_size=max_size, interpolation=cv2.INTER_AREA),
+        A.Resize(height=256, width=458, interpolation=cv2.INTER_AREA), # Due to AI Worker different camera ratio problems give fixed resize.
     ]
 
     if random_rotation_angle is not None and random_rotation_angle != 0:

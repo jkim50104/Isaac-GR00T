@@ -1,34 +1,47 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
-BATCH_SIZE=160
+BATCH_SIZE=32 #160
 ARM_ONLY=true
+USE_WRIST=true
+ACTION_REP=REL
 
-# Default values
-HYPER_PARAMS="B${BATCH_SIZE}"
+BASE_MODEL="nvidia/GR00T-N1.6-3B"
+DATASET_PATH="./data/jkim50104/ffw_sg2_rev1_clear_item"
+EMBODIMENT_TAG="NEW_EMBODIMENT"
+
 CONFIG="ai_worker_config.py"
+HYPER_PARAMS="B${BATCH_SIZE}"
 
-# Apply ARM_ONLY overrides
-if [ "$ARM_ONLY" = true ]; then
-  HYPER_PARAMS="B${BATCH_SIZE}_AO"
+if [[ "${ARM_ONLY}" == "true" ]]; then
   CONFIG="ai_worker_config_arm_only.py"
+  HYPER_PARAMS="B${BATCH_SIZE}_AO"
 fi
 
-# Run finetuning process with the new embodiment tag
-# Configure for single GPU
+if [[ "${USE_WRIST}" == "true" ]]; then
+  HYPER_PARAMS="${HYPER_PARAMS}_WR"
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 <cuda_visible_devices>"
+  echo "Example: $0 0"
+  exit 1
+fi
+
 export NUM_GPUS=1
-export CUDA_VISIBLE_DEVICES=$1
+export CUDA_VISIBLE_DEVICES="$1"
 
 python gr00t/experiment/launch_finetune.py \
-    --base-model-path nvidia/GR00T-N1.6-3B \
-    --dataset-path ./data/jkim50104/ffw_sg2_rev1_clear_item \
-    --embodiment-tag NEW_EMBODIMENT \
-    --modality-config-path ./data/jkim50104/$CONFIG \
-    --num-gpus $NUM_GPUS \
-    --output-dir ./output/ai_worker_${HYPER_PARAMS}_REL_LUNAR \
-    --save-total-limit 5 \
-    --save-steps 5000 \
-    --max-steps 20000 \
-    --use-wandb \
-    --global-batch-size $BATCH_SIZE \
-    --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
-    --dataloader-num-workers 4
+  --base-model-path "${BASE_MODEL}" \
+  --dataset-path "${DATASET_PATH}" \
+  --embodiment-tag "${EMBODIMENT_TAG}" \
+  --modality-config-path "./data/jkim50104/${CONFIG}" \
+  --num-gpus "${NUM_GPUS}" \
+  --output-dir "./output/ai_worker_${HYPER_PARAMS}_${ACTION_REP}" \
+  --save-total-limit 3 \
+  --save-steps 5000 \
+  --max-steps 30000 \
+  --use-wandb \
+  --global-batch-size "${BATCH_SIZE}" \
+  --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
+  --dataloader-num-workers 4

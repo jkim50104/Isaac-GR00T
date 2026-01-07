@@ -523,3 +523,77 @@ class Gr00tN1d6Processor(BaseProcessor):
 
 
 AutoProcessor.register("Gr00tN1d6", Gr00tN1d6Processor)
+
+
+def save_content_images(content, out_dir="./output/image_process_debug/original", max_frames=50):
+    import os
+    import numpy as np
+    from PIL import Image
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    for view, frames in content.images.items():
+        for i, img in enumerate(frames[:max_frames]):
+            if isinstance(img, np.ndarray):
+                # Handle CHW → HWC
+                if img.ndim == 3 and img.shape[0] == 3:
+                    img = np.transpose(img, (1, 2, 0))
+                img = Image.fromarray(img.astype("uint8"))
+
+            path = os.path.join(out_dir, f"{view}_frame_{i}.png")
+            img.save(path)
+            print(f"Saved {path}")
+
+   
+def save_augmented_images(
+    transformed_images,
+    view,
+    out_dir="./output/image_process_debug/augmented",
+    max_frames=50,
+):
+    import os
+    import numpy as np
+    import torch
+    from PIL import Image
+
+    os.makedirs(out_dir, exist_ok=True)
+
+    for i, img in enumerate(transformed_images[:max_frames]):
+        # --- Convert torch.Tensor → numpy HWC uint8 ---
+        if isinstance(img, torch.Tensor):
+            t = img.detach().cpu()
+
+            # CHW -> HWC if needed
+            if t.ndim == 3 and t.shape[0] in (1, 3):
+                t = t.permute(1, 2, 0)
+
+            arr = t.numpy()
+
+            # If float, assume [0,1] (or maybe [0,255]) and convert to uint8
+            if arr.dtype != np.uint8:
+                # Heuristic: if max <= 1.0, scale up
+                if np.nanmax(arr) <= 1.0:
+                    arr = (arr * 255.0).clip(0, 255)
+                arr = arr.clip(0, 255).astype(np.uint8)
+
+            img_pil = Image.fromarray(arr)
+
+        # --- Convert numpy → PIL ---
+        elif isinstance(img, np.ndarray):
+            arr = img
+            if arr.ndim == 3 and arr.shape[0] in (1, 3):  # CHW -> HWC
+                arr = np.transpose(arr, (1, 2, 0))
+            if arr.dtype != np.uint8:
+                if np.nanmax(arr) <= 1.0:
+                    arr = (arr * 255.0).clip(0, 255)
+                arr = arr.clip(0, 255).astype(np.uint8)
+            img_pil = Image.fromarray(arr)
+
+        # --- PIL already ---
+        else:
+            img_pil = img  # assume PIL.Image
+
+        path = os.path.join(out_dir, f"{view}_frame_{i}.png")
+        img_pil.save(path)
+        print(f"Saved augmented {path}")
+
