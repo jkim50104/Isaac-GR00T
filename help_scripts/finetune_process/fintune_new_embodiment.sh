@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NUM_GPUS=2
-BATCH_SIZE=64 #160
+NUM_GPUS=1
+BATCH_SIZE=128 # 128, 160
 ARM_ONLY=true
 USE_WRIST=true
-ACTION_REP=REL
+ACTION_REP=ABS  # ABSOLUTE, RELATIVE
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
 DATASET_PATH="./data/jkim50104/ffw_sg2_rev1_clear_item"
@@ -15,7 +15,7 @@ CONFIG="ai_worker_config.py"
 HYPER_PARAMS="G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
 
 if [[ "${ARM_ONLY}" == "true" ]]; then
-  CONFIG="ai_worker_config_arm_only.py"
+  CONFIG="ai_worker_arm_only_config.py"
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
 fi
 
