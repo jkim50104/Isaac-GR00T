@@ -20,11 +20,11 @@ export CUDA_VISIBLE_DEVICES=$1
 
 python gr00t/experiment/launch_finetune.py \
     --base-model-path nvidia/GR00T-N1.6-3B \
-    --dataset-path ./data/ai_worker/ffw_sg2_rev1_clear_item \
+    --dataset-path ./data/jkim50104/ffw_sg2_rev1_clear_item \
     --embodiment-tag NEW_EMBODIMENT \
-    --modality-config-path ./data/ai_worker/$CONFIG \
+    --modality-config-path ./data/jkim50104/$CONFIG \
     --num-gpus $NUM_GPUS \
-    --output-dir ./output/ai_worker_${HYPER_PARAMS}_REL \
+    --output-dir ./output/ai_worker_${HYPER_PARAMS}_REL_LUNAR \
     --save-total-limit 5 \
     --save-steps 5000 \
     --max-steps 20000 \

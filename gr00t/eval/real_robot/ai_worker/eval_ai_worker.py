@@ -62,6 +62,9 @@ import draccus
 from dataclasses import asdict, dataclass
 import logging
 from pprint import pformat
+import os
+import importlib.util
+
 
 from gr00t.policy.server_client import PolicyClient
 from lerobot.utils.utils import init_logging, log_say
@@ -91,54 +94,150 @@ def recursive_add_extra_dim(obs: Dict) -> Dict:
             obs[key] = [val]
     return obs
 
+# -----------------------------------------------------------------------------
+# Embodiment config loader (FILE PATH version)
+# -----------------------------------------------------------------------------
+def load_embodiment_cfg_from_path(file_path: str, var_name: str = "ai_worker") -> dict:
+    """
+    Load a python file by path and extract `ai_worker` dict from it.
+
+    Example:
+      file_path = "data/jkim50104/ai_worker_config.py"
+    """
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Embodiment config file not found: {file_path}")
+
+    module_name = "_ai_worker_embodiment_config"
+
+    spec = importlib.util.spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load spec from file: {file_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    if not hasattr(module, var_name):
+        raise AttributeError(
+            f"Config file '{file_path}' does not define '{var_name}'"
+        )
+
+    cfg = getattr(module, var_name)
+
+    if not isinstance(cfg, dict):
+        raise TypeError(
+            f"'{var_name}' in {file_path} must be a dict, got {type(cfg)}"
+        )
+
+    return cfg
+
+
+def get_modality_keys(emb_cfg: dict, group: str) -> List[str]:
+    """
+    emb_cfg[group] is a ModalityConfig object (from GR00T).
+    We read `.modality_keys`.
+    """
+    if group not in emb_cfg:
+        raise KeyError(f"embodiment config missing group '{group}'")
+    mc = emb_cfg[group]
+    if not hasattr(mc, "modality_keys"):
+        raise TypeError(f"emb_cfg['{group}'] must have .modality_keys")
+    keys = list(mc.modality_keys)
+    return keys
+
+
+# Fixed per-key joint name mapping (kept in main code, not config)
+JOINTS_BY_KEY: Dict[str, List[str]] = {
+    "left_arm": [
+        "arm_l_joint1", "arm_l_joint2", "arm_l_joint3",
+        "arm_l_joint4", "arm_l_joint5", "arm_l_joint6",
+        "arm_l_joint7",
+    ],
+    "left_gripper": ["gripper_l_joint1"],
+    "right_arm": [
+        "arm_r_joint1", "arm_r_joint2", "arm_r_joint3",
+        "arm_r_joint4", "arm_r_joint5", "arm_r_joint6",
+        "arm_r_joint7",
+    ],
+    "right_gripper": ["gripper_r_joint1"],
+    "head": ["head_joint1", "head_joint2"],
+    "lift": ["lift_joint"],
+    # base is special: comes from cmd_vel (3 dims)
+}
+
+# Base dims are always [lin.x, lin.y, ang.z]
+BASE_DIM = 3
+
 
 # -----------------------------------------------------------------------------
 # Adapter: ai_worker obs dict -> GR00T VLA input, and decode action chunk
 # -----------------------------------------------------------------------------
 class AiWorkerAdapter:
     """
+    Config-driven adapter.
+
     Expects obs:
       obs["rgb"]       : np.uint8 (H,W,3) RGB
-      obs["state_vec"] : np.float32 (22,)
+      obs["state_vec"] : np.float32 (N,)  where N depends on enabled state keys
       obs["lang"]      : str
 
     Produces GR00T input:
-      model_obs["video"] = {"ego_view": rgb}
-      model_obs["state"] = {
-          "left_arm": (7,), "left_gripper": (1,),
-          "right_arm": (7,), "right_gripper": (1,),
-          "head": (2,), "lift": (1,), "base": (3,)
-      }
-      model_obs["language"] = {"annotation.human.action.task_description": lang}
+      model_obs["video"] = {<camera_key>: rgb}  (first key in config by default)
+      model_obs["state"] = dict of enabled state blocks
+      model_obs["language"] = {<lang_key>: lang}
     with (B=1,T=1) dims.
     """
 
-    def __init__(self, policy_client=None):
+    def __init__(
+        self,
+        policy_client,
+        state_keys: List[str],
+        action_keys: List[str],
+        video_keys: List[str],
+        language_key: str,
+        dims_by_key: Dict[str, int],
+    ):
         self.policy = policy_client
 
-        self.state_slices: Dict[str, Tuple[int, int]] = {
-            "left_arm": (0, 7),
-            "left_gripper": (7, 8),
-            "right_arm": (8, 15),
-            "right_gripper": (15, 16),
-            "head": (16, 18),
-            "lift": (18, 19),
-            "base": (19, 22),
-        }
+        self.state_keys = list(state_keys)
+        self.action_keys = list(action_keys)
 
-        # camera key name used inside model_obs["video"]
-        self.camera_key = "ego_view"
+        # Use first configured camera key
+        self.camera_key = video_keys[0] if len(video_keys) > 0 else "ego_view"
+
+        # Use first configured language key (string like "annotation.human.action.task_description")
+        self.language_key = language_key
+
+        # How to slice state_vec into blocks
+        self.dims_by_key = dict(dims_by_key)
+
+        # Precompute slices for state_vec based on state_keys ordering
+        self.state_slices: Dict[str, Tuple[int, int]] = {}
+        idx = 0
+        for k in self.state_keys:
+            if k == "base":
+                dim = BASE_DIM
+            else:
+                if k not in self.dims_by_key:
+                    raise KeyError(f"Missing dims for state key '{k}'")
+                dim = int(self.dims_by_key[k])
+            self.state_slices[k] = (idx, idx + dim)
+            idx += dim
+
+        self.state_vec_dim = idx
 
     def obs_to_policy_inputs(self, obs: Dict[str, Any]) -> Dict[str, Any]:
         assert "rgb" in obs, "obs must include 'rgb' (H,W,3 uint8)"
-        assert "state_vec" in obs, "obs must include 'state_vec' (22,)"
+        assert "state_vec" in obs, "obs must include 'state_vec' (N,)"
         assert "lang" in obs, "obs must include 'lang' (string)"
 
         state_vec = obs["state_vec"]
         if not isinstance(state_vec, np.ndarray):
             raise TypeError(f"state_vec must be np.ndarray, got {type(state_vec)}")
-        if state_vec.shape != (22,):
-            raise ValueError(f"state_vec must have shape (22,), got {state_vec.shape}")
+        if state_vec.shape != (self.state_vec_dim,):
+            raise ValueError(
+                f"state_vec must have shape ({self.state_vec_dim},), got {state_vec.shape}. "
+                f"Enabled state keys: {self.state_keys}"
+            )
 
         state_vec = state_vec.astype(np.float32, copy=False)
 
@@ -147,13 +246,14 @@ class AiWorkerAdapter:
         # (1) Video
         model_obs["video"] = {self.camera_key: obs["rgb"]}
 
-        # (2) State blocks
+        # (2) State blocks (only enabled)
         model_obs["state"] = {}
-        for k, (s, e) in self.state_slices.items():
+        for k in self.state_keys:
+            s, e = self.state_slices[k]
             model_obs["state"][k] = state_vec[s:e]
 
         # (3) Language
-        model_obs["language"] = {"annotation.human.action.task_description": obs["lang"]}
+        model_obs["language"] = {self.language_key: obs["lang"]}
 
         # (4) Add dims: (B=1,T=1)
         model_obs = recursive_add_extra_dim(model_obs)
@@ -162,28 +262,28 @@ class AiWorkerAdapter:
 
     def decode_action_chunk(self, chunk: Dict[str, np.ndarray], t: int) -> Dict[str, np.ndarray]:
         """
-        Expects chunk keys matching self.state_slices, each shaped (B,T,D).
-        Returns dict of per-block arrays for timestep t.
+        Expects chunk keys shaped (B,T,D). Returns per-block arrays for timestep t.
+
+        We ONLY decode keys listed in action_keys (from config).
         """
         out: Dict[str, np.ndarray] = {}
-        for k, _ in self.state_slices.items():
+        for k in self.action_keys:
             if k not in chunk:
-                raise KeyError(f"action_chunk missing key '{k}'")
+                raise KeyError(f"action_chunk missing key '{k}' (expected from config)")
             out[k] = chunk[k][0][t]  # (D,)
         return out
 
     def get_action(self, obs: Dict[str, Any]) -> List[Dict[str, np.ndarray]]:
         """
-        Calls policy if self.policy is set. Returns list of per-step actions.
+        Calls policy. Returns list of per-step actions (dict per step).
         """
-        if self.policy is None:
-            raise RuntimeError("AiWorkerAdapter.policy is None. Provide a PolicyClient to call get_action().")
-
         model_input = self.obs_to_policy_inputs(obs)
         action_chunk, info = self.policy.get_action(model_input)
 
+        # Determine horizon T from any returned key
         any_key = next(iter(action_chunk.keys()))
         horizon = action_chunk[any_key].shape[1]  # (B,T,D) -> T
+
         return [self.decode_action_chunk(action_chunk, t) for t in range(horizon)]
 
 
@@ -195,45 +295,34 @@ class AiWorkerObsCollector(Node):
     Collects ai_worker observation from ROS2 topics:
       - RGB image topic
       - JointState
-      - cmd_vel
+      - cmd_vel (optional depending on whether "base" is enabled)
     """
 
-    def __init__(self):
+    def __init__(self, enabled_state_keys: List[str]):
         super().__init__("ai_worker_obs_collector")
 
-        # Topics from your current ROS2 graph
+        self.enabled_state_keys = list(enabled_state_keys)
+
+        # Topics from your current ROS2 graph (kept fixed)
         self.topic_rgb = "/zed/zed_node/left/image_rect_color"
         self.topic_joint_states = "/joint_states"
         self.topic_cmd_vel = "/cmd_vel"
 
-        # Joint ordering for dims 0..18 (19 values total)
-        self.left_arm_joints = [
-            "arm_l_joint1", "arm_l_joint2", "arm_l_joint3",
-            "arm_l_joint4", "arm_l_joint5", "arm_l_joint6",
-            "arm_l_joint7",
-        ]
-        self.left_gripper_joint = ["gripper_l_joint1"]
+        # Build the required joint order based on enabled_state_keys.
+        # base is special: from cmd_vel, no joints.
+        self.state_joint_order: List[str] = []
+        for k in self.enabled_state_keys:
+            if k == "base":
+                continue
+            if k not in JOINTS_BY_KEY:
+                raise KeyError(
+                    f"Enabled state key '{k}' has no fixed joint mapping in JOINTS_BY_KEY. "
+                    f"Add it to JOINTS_BY_KEY or remove it from config."
+                )
+            self.state_joint_order.extend(JOINTS_BY_KEY[k])
 
-        self.right_arm_joints = [
-            "arm_r_joint1", "arm_r_joint2", "arm_r_joint3",
-            "arm_r_joint4", "arm_r_joint5", "arm_r_joint6",
-            "arm_r_joint7",
-        ]
-        self.right_gripper_joint = ["gripper_r_joint1"]
-
-        self.head_joints = ["head_joint1", "head_joint2"]
-        self.lift_joint = ["lift_joint"]
-
-        self.state19_joint_order: List[str] = (
-            self.left_arm_joints
-            + self.left_gripper_joint
-            + self.right_arm_joints
-            + self.right_gripper_joint
-            + self.head_joints
-            + self.lift_joint
-        )
-        if len(self.state19_joint_order) != 19:
-            raise ValueError(f"Expected 19 joints for state[0:19], got {len(self.state19_joint_order)}")
+        # Total state_vec dim = sum(joint dims) + (base? 3)
+        self.state_vec_dim = len(self.state_joint_order) + (BASE_DIM if "base" in self.enabled_state_keys else 0)
 
         # Internal state
         self.bridge = CvBridge()
@@ -244,7 +333,6 @@ class AiWorkerObsCollector(Node):
         self.joint_map: Dict[str, float] = {}
         self.latest_joint_time: Optional[float] = None
 
-        # base dims: [lin.x, lin.y, ang.z]
         self.latest_cmd_vel = np.zeros(3, dtype=np.float32)
         self.latest_cmd_vel_time: Optional[float] = None
 
@@ -253,7 +341,9 @@ class AiWorkerObsCollector(Node):
         self.create_subscription(JointState, self.topic_joint_states, self._on_joint_states, 10)
         self.create_subscription(Twist, self.topic_cmd_vel, self._on_cmd_vel, 10)
 
-        self.get_logger().info("AiWorkerObsCollector started")
+        self.get_logger().info("AiWorkerObsCollector started (config-driven modalities)")
+        self.get_logger().info(f"  Enabled state keys: {self.enabled_state_keys}")
+        self.get_logger().info(f"  state_vec_dim: {self.state_vec_dim}")
         self.get_logger().info(f"  RGB:    {self.topic_rgb}")
         self.get_logger().info(f"  JOINTS: {self.topic_joint_states}")
         self.get_logger().info(f"  CMD:    {self.topic_cmd_vel}")
@@ -279,7 +369,7 @@ class AiWorkerObsCollector(Node):
     def build_obs(self, lang: str, require_cmd_vel: bool = False) -> Optional[Dict[str, Any]]:
         """
         Build and return ai_worker obs dict, or None if not ready.
-
+        
         require_cmd_vel:
           - False: base defaults to zeros until cmd_vel arrives
           - True: return None until cmd_vel is received at least once
@@ -287,21 +377,24 @@ class AiWorkerObsCollector(Node):
         if self.latest_rgb is None:
             return None
 
-        for jname in self.state19_joint_order:
+        # Require all configured joints
+        for jname in self.state_joint_order:
             if jname not in self.joint_map:
                 return None
-
-        if require_cmd_vel and self.latest_cmd_vel_time is None:
+            
+        # Require cmd_vel only if base is enabled
+        if "base" in self.enabled_state_keys and require_cmd_vel and self.latest_cmd_vel_time is None:
             return None
 
-        state_vec = np.zeros(22, dtype=np.float32)
+        state_vec = np.zeros(self.state_vec_dim, dtype=np.float32)
 
-        # 0..18 from joints
-        for i, jname in enumerate(self.state19_joint_order):
+        # Fill joint portion (always first)
+        for i, jname in enumerate(self.state_joint_order):
             state_vec[i] = self.joint_map[jname]
 
-        # 19..21 base from cmd_vel
-        state_vec[19:22] = self.latest_cmd_vel
+        # Append base if enabled
+        if "base" in self.enabled_state_keys:
+            state_vec[len(self.state_joint_order): len(self.state_joint_order) + BASE_DIM] = self.latest_cmd_vel
 
         return {
             "rgb": self.latest_rgb,
@@ -329,8 +422,10 @@ class AiWorkerCommandSender(Node):
       - base is Twist velocities: [lin.x, lin.y, ang.z]
     """
 
-    def __init__(self):
+    def __init__(self, enabled_action_keys: List[str]):
         super().__init__("ai_worker_command_sender")
+        
+        self.enabled_action_keys = list(enabled_action_keys)
 
         # Publishers (same topics as your reference code)
         self.pub_left = self.create_publisher(
@@ -369,9 +464,6 @@ class AiWorkerCommandSender(Node):
         self.head_joint_names = ["head_joint1", "head_joint2"]
         self.lift_joint_names = ["lift_joint"]
 
-        # Single-point horizon for controllers (simple; can be replaced with smoothing later)
-        self.point_dt_sec = 0.10  # seconds
-
     def _duration_msg(self, t_sec: float) -> Duration:
         d = Duration()
         d.sec = int(t_sec)
@@ -398,8 +490,9 @@ class AiWorkerCommandSender(Node):
         """
         Execute one policy action chunk over exec_sec seconds.
 
-        - Arms / head / lift: multi-point JointTrajectory
-        - Base: hold last Twist command for exec_sec
+        This is config-driven:
+        - Only publishes modalities present in enabled_action_keys.
+        - Policy outputs are treated as ABSOLUTE targets (per your note).
         """
         if len(action_seq) == 0:
             return
@@ -407,39 +500,46 @@ class AiWorkerCommandSender(Node):
         K = len(action_seq)
         dt_per_point = exec_sec / K
 
-        # ---------- Stack joint waypoints ----------
-        left_arm = np.stack([a["left_arm"] for a in action_seq], axis=0)        # (K,7)
-        left_grip = np.stack([a["left_gripper"] for a in action_seq], axis=0)   # (K,1)
-        right_arm = np.stack([a["right_arm"] for a in action_seq], axis=0)
-        right_grip = np.stack([a["right_gripper"] for a in action_seq], axis=0)
+        # ---- Left / Right arms+grippers (publish only if present) ----
+        has_left_arm = "left_arm" in self.enabled_action_keys
+        has_left_grip = "left_gripper" in self.enabled_action_keys
+        has_right_arm = "right_arm" in self.enabled_action_keys
+        has_right_grip = "right_gripper" in self.enabled_action_keys
 
-        head = np.stack([a["head"] for a in action_seq], axis=0)                # (K,2)
-        lift = np.stack([a["lift"] for a in action_seq], axis=0)                # (K,1)
+        if has_left_arm and has_left_grip:
+            left_arm = np.stack([a["left_arm"] for a in action_seq], axis=0)       # (K,7)
+            left_grip = np.stack([a["left_gripper"] for a in action_seq], axis=0)  # (K,1)
+            left_pos_seq = np.concatenate([left_arm, left_grip], axis=1)           # (K,8)
+            self.pub_left.publish(self._traj_msg_multi(self.left_joint_names, left_pos_seq, dt_per_point))
+        elif has_left_arm or has_left_grip:
+            self.get_logger().warn("Config includes only one of left_arm/left_gripper; skipping left trajectory publish.")
 
-        left_pos_seq = np.concatenate([left_arm, left_grip], axis=1)            # (K,8)
-        right_pos_seq = np.concatenate([right_arm, right_grip], axis=1)         # (K,8)
+        if has_right_arm and has_right_grip:
+            right_arm = np.stack([a["right_arm"] for a in action_seq], axis=0)       # (K,7)
+            right_grip = np.stack([a["right_gripper"] for a in action_seq], axis=0)  # (K,1)
+            right_pos_seq = np.concatenate([right_arm, right_grip], axis=1)          # (K,8)
+            self.pub_right.publish(self._traj_msg_multi(self.right_joint_names, right_pos_seq, dt_per_point))
+        elif has_right_arm or has_right_grip:
+            self.get_logger().warn("Config includes only one of right_arm/right_gripper; skipping right trajectory publish.")
 
-        # ---------- Publish joint trajectories ----------
-        self.pub_left.publish(
-            self._traj_msg_multi(self.left_joint_names, left_pos_seq, dt_per_point)
-        )
-        self.pub_right.publish(
-            self._traj_msg_multi(self.right_joint_names, right_pos_seq, dt_per_point)
-        )
-        # self.pub_head.publish(
-        #     self._traj_msg_multi(self.head_joint_names, head, dt_per_point)
-        # )
-        # self.pub_lift.publish(
-        #     self._traj_msg_multi(self.lift_joint_names, lift, dt_per_point)
-        # )
+        # ---- Head (optional) ----
+        if "head" in self.enabled_action_keys:
+            head = np.stack([a["head"] for a in action_seq], axis=0)  # (K,2)
+            self.pub_head.publish(self._traj_msg_multi(self.head_joint_names, head, dt_per_point))
 
-        # ---------- Base: hold last velocity for exec_sec ----------
-        base = np.asarray(action_seq[-1]["base"]).reshape(3)
-        tw = Twist()
-        tw.linear.x = float(base[0])
-        tw.linear.y = float(base[1])
-        tw.angular.z = float(base[2])
-        # self.pub_base.publish(tw)
+        # ---- Lift (optional) ----
+        if "lift" in self.enabled_action_keys:
+            lift = np.stack([a["lift"] for a in action_seq], axis=0)  # (K,1)
+            self.pub_lift.publish(self._traj_msg_multi(self.lift_joint_names, lift, dt_per_point))
+
+        # ---- Base (optional) ----
+        if "base" in self.enabled_action_keys:
+            base = np.asarray(action_seq[-1]["base"]).reshape(3)
+            tw = Twist()
+            tw.linear.x = float(base[0])
+            tw.linear.y = float(base[1])
+            tw.angular.z = float(base[2])
+            self.pub_base.publish(tw)
 
 
 # =============================================================================
@@ -453,19 +553,20 @@ class EvalConfig:
     """
     policy_host: str = "localhost"
     policy_port: int = 5555
-    action_horizon: int = 8
+    action_horizon: int = 16
     lang_instruction: str = "clear the items on the shelf"
     play_sounds: bool = False
     timeout: int = 60  # (kept to match SO100 style; not enforced here)
 
     # Control loop rate (matches SO100 ~30Hz)
     control_hz: float = 30.0
-
+    
     # If True: wait until cmd_vel has been received at least once before producing obs
     require_cmd_vel: bool = False
-
-    # Single-point trajectory time_from_start (seconds)
-    traj_point_dt: float = 0.10
+    
+    # Load ai worker config
+    embodiment_config_path: str = "data/jkim50104/ai_worker_config.py" 
+    embodiment_config_var: str = "ai_worker"
 
 
 # =============================================================================
@@ -481,12 +582,34 @@ def eval(cfg: EvalConfig):
     logging.info(pformat(asdict(cfg)))
 
     # -------------------------------------------------------------------------
+    # 0) Load embodiment config dict (ai_worker)
+    # -------------------------------------------------------------------------
+    emb_cfg = load_embodiment_cfg_from_path(cfg.embodiment_config_path, cfg.embodiment_config_var)
+
+
+    video_keys = get_modality_keys(emb_cfg, "video")
+    state_keys = get_modality_keys(emb_cfg, "state")
+    action_keys = get_modality_keys(emb_cfg, "action")
+    lang_keys = get_modality_keys(emb_cfg, "language")
+    language_key = lang_keys[0] if len(lang_keys) > 0 else "annotation.human.action.task_description"
+
+    # dims needed only for slicing state_vec into blocks
+    dims_by_key = {
+        "left_arm": 7,
+        "left_gripper": 1,
+        "right_arm": 7,
+        "right_gripper": 1,
+        "head": 2,
+        "lift": 1,
+        # base handled as 3 internally
+    }
+
+    # -------------------------------------------------------------------------
     # 1) Initialize ROS2 + Collector + Sender
     # -------------------------------------------------------------------------
     rclpy.init()
-    collector = AiWorkerObsCollector()
-    sender = AiWorkerCommandSender()
-    sender.point_dt_sec = float(cfg.traj_point_dt)
+    collector = AiWorkerObsCollector(enabled_state_keys=state_keys)
+    sender = AiWorkerCommandSender(enabled_action_keys=action_keys)
 
     log_say("Initializing ROS2 collector/sender", cfg.play_sounds, blocking=True)
 
@@ -494,7 +617,14 @@ def eval(cfg: EvalConfig):
     # 2) Initialize Policy Client + Adapter
     # -------------------------------------------------------------------------
     policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = AiWorkerAdapter(policy_client)
+    policy = AiWorkerAdapter(
+        policy_client=policy_client,
+        state_keys=state_keys,
+        action_keys=action_keys,
+        video_keys=video_keys,
+        language_key=language_key,
+        dims_by_key=dims_by_key,
+    )
 
     log_say(
         f'Policy ready with instruction: "{cfg.lang_instruction}"',
@@ -518,7 +648,6 @@ def eval(cfg: EvalConfig):
 
             # Use as many points as we have (or cap if you want)
             action_seq = actions[: cfg.action_horizon]
-            print(action_seq)
 
             # Publish joint trajectories that execute over 1 second
             sender.send_action_sequence_1s(action_seq, exec_sec=exec_sec)
