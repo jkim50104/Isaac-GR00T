@@ -1,11 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SERVER="$(hostname -s)"   # or: hostname
+
+# Defaults (fallback)
 NUM_GPUS=1
-BATCH_SIZE=128 # 128, 160
+BATCH_SIZE=128
 ARM_ONLY=true
 USE_WRIST=true
-ACTION_REP=ABS  # ABSOLUTE, RELATIVE
+ACTION_REP=ABS
+
+case "${SERVER}" in
+  *pearl*)
+    NUM_GPUS=2
+    BATCH_SIZE=256
+    ARM_ONLY=true
+    USE_WRIST=true
+    ACTION_REP=ABS
+    ;;
+  *turing*)
+    NUM_GPUS=4
+    BATCH_SIZE=256
+    ARM_ONLY=true
+    USE_WRIST=true
+    ACTION_REP=ABS
+    ;;
+  *lunar*)
+    NUM_GPUS=1
+    BATCH_SIZE=128
+    ARM_ONLY=true
+    USE_WRIST=true
+    ACTION_REP=ABS
+    ;;
+  *)
+    echo "Unknown server hostname '${SERVER}', using defaults."
+    ;;
+esac
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
 DATASET_PATH="./data/jkim50104/ffw_sg2_rev1_clear_item"
@@ -46,4 +76,4 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
-  --dataloader-num-workers 4
+  --dataloader-num-workers $((4 * NUM_GPUS))
