@@ -254,6 +254,7 @@ def build_image_transformations_albumentations(
             A.SmallestMaxSize(max_size=max_size, interpolation=cv2.INTER_AREA),
             FractionalCenterCrop(crop_fraction=fraction_to_use),
             A.SmallestMaxSize(max_size=max_size, interpolation=cv2.INTER_AREA),
+            A.Resize(height=256, width=458, interpolation=cv2.INTER_AREA), # Due to AI Worker different camera ratio problems give fixed resize.
         ]
     )
 
