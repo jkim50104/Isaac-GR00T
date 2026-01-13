@@ -1,0 +1,72 @@
+{
+    "state": {
+        "left_arm": {
+            "start": 0,
+            "end": 7
+        },
+        "left_gripper": {
+            "start": 7,
+            "end": 8
+        },
+        "right_arm": {
+            "start": 8,
+            "end": 15
+        },
+        "right_gripper": {
+            "start": 15,
+            "end": 16
+        },
+        "head": {
+            "start": 16,
+            "end": 18
+        },
+        "lift": {
+            "start": 18,
+            "end": 19
+        },
+        "base": {
+            "start": 19,
+            "end": 22
+        }
+    },
+    "action": {
+        "left_arm": {
+            "start": 0,
+            "end": 7
+        },
+        "left_gripper": {
+            "start": 7,
+            "end": 8
+        },
+        "right_arm": {
+            "start": 8,
+            "end": 15
+        },
+        "right_gripper": {
+            "start": 15,
+            "end": 16
+        },
+        "head": {
+            "start": 16,
+            "end": 18
+        },
+        "lift": {
+            "start": 18,
+            "end": 19
+        },
+        "base": {
+            "start": 19,
+            "end": 22
+        }
+    },
+    "video": {
+        "ego_view": {"original_key": "observation.images.cam_head"},
+        "left_wrist_view": {"original_key": "observation.images.cam_wrist_left"},
+        "right_wrist_view": {"original_key": "observation.images.cam_wrist_right"}
+    },
+    "annotation": {
+        "human.action.task_description": {
+            "original_key": "task_index"
+        }
+    }
+}
