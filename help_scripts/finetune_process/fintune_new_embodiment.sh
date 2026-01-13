@@ -8,15 +8,16 @@ NUM_GPUS=1
 BATCH_SIZE=128
 ARM_ONLY=true
 USE_WRIST=true
-ACTION_REP=ABS
+ACTION_REP=REL
 
 case "${SERVER}" in
   *pearl*)
-    NUM_GPUS=2
-    BATCH_SIZE=256
+    NUM_GPUS=4
+    BATCH_SIZE=512
     ARM_ONLY=true
     USE_WRIST=true
-    ACTION_REP=ABS
+    ACTION_REP=REL
+    ulimit -n 65535
     ;;
   *turing*)
     NUM_GPUS=4
@@ -76,4 +77,4 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
-  --dataloader-num-workers $((4 * NUM_GPUS))
+  --dataloader-num-workers 4
