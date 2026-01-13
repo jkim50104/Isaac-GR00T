@@ -23,7 +23,7 @@ case "${SERVER}" in
     BATCH_SIZE=256
     ARM_ONLY=true
     USE_WRIST=true
-    ACTION_REP=ABS
+    ACTION_REP=REL
     ;;
   *lunar*)
     NUM_GPUS=1
@@ -76,4 +76,4 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
-  --dataloader-num-workers $((4 * NUM_GPUS))
+  --dataloader-num-workers 4
