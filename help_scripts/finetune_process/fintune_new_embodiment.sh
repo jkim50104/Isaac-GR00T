@@ -24,7 +24,7 @@ case "${SERVER}" in
     BATCH_SIZE=256
     ARM_ONLY=true
     USE_WRIST=true
-    ACTION_REP=ABS
+    ACTION_REP=REL
     ;;
   *lunar*)
     NUM_GPUS=1
