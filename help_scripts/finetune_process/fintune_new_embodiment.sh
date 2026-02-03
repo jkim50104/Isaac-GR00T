@@ -12,10 +12,10 @@ ACTION_REP=REL
 
 case "${SERVER}" in
   *pearl*)
-    NUM_GPUS=4
-    BATCH_SIZE=512
-    ARM_ONLY=false
-    USE_WRIST=false
+    NUM_GPUS=4 #4
+    BATCH_SIZE=512 #512
+    ARM_ONLY=true
+    USE_WRIST=true
     ACTION_REP=REL
     ulimit -n 65535
     ;;
@@ -39,8 +39,8 @@ case "${SERVER}" in
 esac
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_NAME="ffw_sg2_rev1_base_drive_test"
-DATASET_PATH="./data/jkim50104/$DATASET_NAME" # ffw_sg2_rev1_clear_item, ffw_sg2_rev1_base_drive_test
+DATASET_NAME="ffw_sg2_rev1_pick_bowl" # ffw_sg2_rev1_clear_item, ffw_sg2_rev1_base_drive_test, ffw_sg2_rev1_pick_bowl
+DATASET_PATH="./data/jkim50104/$DATASET_NAME" 
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
@@ -72,9 +72,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node=$NUM_GPUS \
   --modality-config-path "./help_scripts/data_config/${CONFIG}" \
   --num-gpus "${NUM_GPUS}" \
   --output-dir "./output/$DATASET_NAME/${HYPER_PARAMS}" \
-  --save-total-limit 3 \
-  --save-steps 5000 \
-  --max-steps 10000 \
+  --save-total-limit 2 \
+  --save-steps 10000 \
+  --max-steps 30000 \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \

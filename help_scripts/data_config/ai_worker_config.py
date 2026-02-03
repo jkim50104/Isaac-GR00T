@@ -6,8 +6,8 @@ ai_worker = {
     "video": ModalityConfig(
         delta_indices=[0],
         modality_keys=["ego_view",
-                    #    "left_wrist_view",
-                    #    "right_wrist_view",
+                       "left_wrist_view",
+                       "right_wrist_view",
                        ],
     ),
     "state": ModalityConfig(
