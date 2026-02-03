@@ -26,7 +26,7 @@ What it does
 3) Converts obs -> GR00T VLA model input format (video/state/language) with (B=1,T=1).
 
 4) Runs an eval loop:
-   obs -> policy -> multi-step action chunk -> stream actions at ~control_hz
+   obs -> policy -> multi-step action chunk -> stream actions
 
 5) Sends actions to robot using:
    - JointTrajectory:
@@ -53,8 +53,9 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from builtin_interfaces.msg import Duration  # add this import
+import cv2
 
-from sensor_msgs.msg import Image, JointState
+from sensor_msgs.msg import Image, JointState, CompressedImage
 from geometry_msgs.msg import Twist
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
@@ -93,6 +94,91 @@ def recursive_add_extra_dim(obs: Dict) -> Dict:
         else:
             obs[key] = [val]
     return obs
+
+def display_obs_rgb(
+    obs: Dict[str, Any],
+    scale: float = 1.0,
+    win_name: str = "rgb_concat",
+    # Prefer key-based order now (matches your mental model)
+    key_order=("left_wrist_view", "ego_view", "right_wrist_view"),
+) -> None:
+    """
+    Visualize obs["rgb"] as a single concatenated view.
+
+    Supports:
+      - obs["rgb"] as dict: {camera_key: np.uint8(H,W,3) RGB}
+      - obs["rgb"] as list/tuple (legacy): [img0, img1, ...]
+
+    - Expects each rgb image as uint8 RGB (H,W,3).
+    - Converts to BGR for cv2.imshow.
+    - Resizes images to same height before concatenation.
+    """
+    if obs is None or "rgb" not in obs:
+        return
+
+    rgb = obs["rgb"]
+
+    # ---- Normalize to an ordered list of images ----
+    if isinstance(rgb, dict):
+        if len(rgb) == 0:
+            return
+
+        # Use key_order first, then any remaining keys (stable)
+        ordered_keys = [k for k in key_order if k in rgb]
+        for k in rgb.keys():
+            if k not in ordered_keys:
+                ordered_keys.append(k)
+
+        rgb_list = [rgb.get(k, None) for k in ordered_keys]
+
+    elif isinstance(rgb, (list, tuple)):
+        if len(rgb) == 0:
+            return
+        rgb_list = list(rgb)
+
+    else:
+        return
+
+    # ---- Filter/scale ----
+    imgs = []
+    for img in rgb_list:
+        if img is None:
+            continue
+        if not isinstance(img, np.ndarray) or img.ndim != 3 or img.shape[2] != 3:
+            continue
+
+        if scale != 1.0:
+            h, w = img.shape[:2]
+            img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))))
+
+        imgs.append(img)
+
+    if len(imgs) == 0:
+        return
+
+    # ---- Show ----
+    if len(imgs) == 1:
+        bgr = cv2.cvtColor(imgs[0], cv2.COLOR_RGB2BGR)
+        cv2.imshow(win_name, bgr)
+        cv2.waitKey(1)
+        return
+
+    # Match heights (no upscaling)
+    heights = [im.shape[0] for im in imgs]
+    target_h = min(heights)
+    resized = []
+    for im in imgs:
+        h, w = im.shape[:2]
+        if h != target_h:
+            new_w = max(1, int(w * (target_h / h)))
+            im = cv2.resize(im, (new_w, target_h))
+        resized.append(im)
+
+    concat_rgb = cv2.hconcat(resized)
+    concat_bgr = cv2.cvtColor(concat_rgb, cv2.COLOR_RGB2BGR)
+    cv2.imshow(win_name, concat_bgr)
+    cv2.waitKey(1)
+
 
 # -----------------------------------------------------------------------------
 # Embodiment config loader (FILE PATH version)
@@ -181,7 +267,7 @@ class AiWorkerAdapter:
       obs["lang"]      : str
 
     Produces GR00T input:
-      model_obs["video"] = {<camera_key>: rgb}  (first key in config by default)
+      model_obs["video"] = {<camera_keys>: rgb}  (first key in config by default)
       model_obs["state"] = dict of enabled state blocks
       model_obs["language"] = {<lang_key>: lang}
     with (B=1,T=1) dims.
@@ -202,7 +288,7 @@ class AiWorkerAdapter:
         self.action_keys = list(action_keys)
 
         # Use first configured camera key
-        self.camera_key = video_keys[0] if len(video_keys) > 0 else "ego_view"
+        self.camera_keys = video_keys
 
         # Use first configured language key (string like "annotation.human.action.task_description")
         self.language_key = language_key
@@ -226,10 +312,16 @@ class AiWorkerAdapter:
         self.state_vec_dim = idx
 
     def obs_to_policy_inputs(self, obs: Dict[str, Any]) -> Dict[str, Any]:
-        assert "rgb" in obs, "obs must include 'rgb' (H,W,3 uint8)"
+        assert isinstance(obs["rgb"], dict), \
+            f"obs['rgb'] must be dict keyed by modality key, got {type(obs['rgb'])}"
         assert "state_vec" in obs, "obs must include 'state_vec' (N,)"
         assert "lang" in obs, "obs must include 'lang' (string)"
 
+        # Verify required camera keys exist
+        missing = [k for k in self.camera_keys if k not in obs["rgb"]]
+        assert not missing, \
+            f"Missing required camera keys: {missing}. Got keys={list(obs['rgb'].keys())}"
+        
         state_vec = obs["state_vec"]
         if not isinstance(state_vec, np.ndarray):
             raise TypeError(f"state_vec must be np.ndarray, got {type(state_vec)}")
@@ -244,7 +336,7 @@ class AiWorkerAdapter:
         model_obs: Dict[str, Any] = {}
 
         # (1) Video
-        model_obs["video"] = {self.camera_key: obs["rgb"]}
+        model_obs["video"] = {k: obs["rgb"][k] for k in self.camera_keys}
 
         # (2) State blocks (only enabled)
         model_obs["state"] = {}
@@ -291,20 +383,35 @@ class AiWorkerAdapter:
 # ROS2 collector: subscribes + builds ai_worker obs dict
 # -----------------------------------------------------------------------------
 class AiWorkerObsCollector(Node):
-    """
-    Collects ai_worker observation from ROS2 topics:
-      - RGB image topic
-      - JointState
-      - cmd_vel (optional depending on whether "base" is enabled)
-    """
-
-    def __init__(self, enabled_state_keys: List[str]):
+    def __init__(self, enabled_state_keys: List[str], video_keys: List[str], use_compressed_rgb: bool = False):
         super().__init__("ai_worker_obs_collector")
-
         self.enabled_state_keys = list(enabled_state_keys)
+        self.video_keys = list(video_keys)
+        self.use_compressed_rgb = bool(use_compressed_rgb)
 
-        # Topics from your current ROS2 graph (kept fixed)
-        self.topic_rgb = "/zed/zed_node/left/image_rect_color"
+        if len(self.video_keys) == 0:
+            raise ValueError("video_keys is empty; need at least one camera modality key.")
+        
+        CAMERA_KEY_TO_TOPIC = {
+            "ego_view": "/zed/zed_node/left/image_rect_color",
+            "left_wrist_view": "/camera_left/camera_left/color/image_rect_raw",
+            "right_wrist_view": "/camera_right/camera_right/color/image_rect_raw",
+        }
+        
+        # Resolve which topics to subscribe to based on modality keys
+        self.camera_key_to_topic: Dict[str, str] = {}
+        for k in self.video_keys:
+            if k not in CAMERA_KEY_TO_TOPIC:
+                raise KeyError(f"Unknown video modality key '{k}'. Add it to CAMERA_KEY_TO_TOPIC.")
+            topic = CAMERA_KEY_TO_TOPIC[k]
+            if self.use_compressed_rgb:
+                topic = topic + "/compressed"
+            self.camera_key_to_topic[k] = topic
+
+        # For logging / loops
+        self.topic_rgb_list = list(self.camera_key_to_topic.values())
+        self.topic_to_camera_key = {t: k for k, t in self.camera_key_to_topic.items()}
+
         self.topic_joint_states = "/joint_states"
         self.topic_cmd_vel = "/cmd_vel"
 
@@ -327,8 +434,9 @@ class AiWorkerObsCollector(Node):
         # Internal state
         self.bridge = CvBridge()
 
-        self.latest_rgb: Optional[np.ndarray] = None
-        self.latest_rgb_time: Optional[float] = None
+        # Latest RGB per camera KEY
+        self.latest_rgb_by_key: Dict[str, np.ndarray] = {}
+        self.latest_rgb_time_by_key: Dict[str, float] = {}
 
         self.joint_map: Dict[str, float] = {}
         self.latest_joint_time: Optional[float] = None
@@ -337,24 +445,52 @@ class AiWorkerObsCollector(Node):
         self.latest_cmd_vel_time: Optional[float] = None
 
         # Subscribers
-        self.create_subscription(Image, self.topic_rgb, self._on_rgb, 10)
+        for topic in self.topic_rgb_list:
+            if self.use_compressed_rgb:
+                self.create_subscription(
+                    CompressedImage, topic,
+                    lambda msg, t=topic: self._on_rgb_compressed(msg, t),
+                    10
+                )
+            else:
+                self.create_subscription(
+                    Image, topic,
+                    lambda msg, t=topic: self._on_rgb(msg, t),
+                    10
+                )
         self.create_subscription(JointState, self.topic_joint_states, self._on_joint_states, 10)
         self.create_subscription(Twist, self.topic_cmd_vel, self._on_cmd_vel, 10)
 
         self.get_logger().info("AiWorkerObsCollector started (config-driven modalities)")
         self.get_logger().info(f"  Enabled state keys: {self.enabled_state_keys}")
         self.get_logger().info(f"  state_vec_dim: {self.state_vec_dim}")
-        self.get_logger().info(f"  RGB:    {self.topic_rgb}")
+        self.get_logger().info(f"  use_compressed_rgb: {self.use_compressed_rgb}")
+        self.get_logger().info(f"  RGB topics: {self.topic_rgb_list}")
         self.get_logger().info(f"  JOINTS: {self.topic_joint_states}")
         self.get_logger().info(f"  CMD:    {self.topic_cmd_vel}")
 
-    def _on_rgb(self, msg: Image):
+    def _on_rgb(self, msg: Image, topic: str):
         try:
             img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-            self.latest_rgb = img
-            self.latest_rgb_time = time.time()
+            cam_key = self.topic_to_camera_key[topic]
+            self.latest_rgb_by_key[cam_key] = img
+            self.latest_rgb_time_by_key[cam_key] = time.time()
         except Exception as e:
-            self.get_logger().warn(f"RGB convert failed: {e}")
+            self.get_logger().warn(f"RGB convert failed for {topic}: {e}")
+
+    def _on_rgb_compressed(self, msg: CompressedImage, topic: str):
+        try:
+            np_arr = np.frombuffer(msg.data, dtype=np.uint8)
+            bgr = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if bgr is None:
+                raise RuntimeError("cv2.imdecode returned None")
+            rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+            cam_key = self.topic_to_camera_key[topic]
+            self.latest_rgb_by_key[cam_key] = rgb
+            self.latest_rgb_time_by_key[cam_key] = time.time()
+        except Exception as e:
+            self.get_logger().warn(f"Compressed RGB decode failed for {topic}: {e}")
 
     def _on_joint_states(self, msg: JointState):
         n = min(len(msg.name), len(msg.position))
@@ -366,47 +502,126 @@ class AiWorkerObsCollector(Node):
         self.latest_cmd_vel[:] = [msg.linear.x, msg.linear.y, msg.angular.z]
         self.latest_cmd_vel_time = time.time()
 
-    def build_obs(self, lang: str, require_cmd_vel: bool = False) -> Optional[Dict[str, Any]]:
-        """
-        Build and return ai_worker obs dict, or None if not ready.
-        
-        require_cmd_vel:
-          - False: base defaults to zeros until cmd_vel arrives
-          - True: return None until cmd_vel is received at least once
-        """
-        if self.latest_rgb is None:
-            return None
+    def wait_until_fresh_after(self, after_time: float, timeout_sec: float = 1.0) -> bool:
+        t0 = time.time()
+        while rclpy.ok() and (time.time() - t0) < timeout_sec:
+            rclpy.spin_once(self, timeout_sec=0.01)
 
-        # Require all configured joints
+            ok = True
+
+            if self.latest_joint_time is not None and self.latest_joint_time < after_time:
+                ok = False
+
+            # Only require requested camera keys
+            for k in self.video_keys:
+                t = self.latest_rgb_time_by_key.get(k, None)
+                if t is None or t < after_time:
+                    ok = False
+                    break
+
+            if ok:
+                return True
+        return False
+
+    def build_obs(self, lang: str, require_cmd_vel: bool = False) -> Optional[Dict[str, Any]]:
+        # Require all requested camera keys
+        for k in self.video_keys:
+            if k not in self.latest_rgb_by_key:
+                return None
+
+        # Require joints
         for jname in self.state_joint_order:
             if jname not in self.joint_map:
                 return None
-            
-        # Require cmd_vel only if base is enabled
+
+        # Require cmd_vel only if base enabled & requested
         if "base" in self.enabled_state_keys and require_cmd_vel and self.latest_cmd_vel_time is None:
             return None
 
         state_vec = np.zeros(self.state_vec_dim, dtype=np.float32)
-
-        # Fill joint portion (always first)
         for i, jname in enumerate(self.state_joint_order):
             state_vec[i] = self.joint_map[jname]
-
-        # Append base if enabled
         if "base" in self.enabled_state_keys:
             state_vec[len(self.state_joint_order): len(self.state_joint_order) + BASE_DIM] = self.latest_cmd_vel
 
+        # rgb is a dict keyed by modality key (subset)
+        rgb_dict = {k: self.latest_rgb_by_key[k] for k in self.video_keys}
+
         return {
-            "rgb": self.latest_rgb,
+            "rgb": rgb_dict,
             "state_vec": state_vec,
             "lang": lang,
             "timestamps": {
-                "rgb_time": self.latest_rgb_time,
+                "rgb_time_by_key": dict(self.latest_rgb_time_by_key),
                 "joint_time": self.latest_joint_time,
                 "cmd_vel_time": self.latest_cmd_vel_time,
             },
         }
 
+
+class ObsExecutionTimeChecker:
+    """
+    Human-readable checker:
+    verifies obs timestamps are AFTER the last action execution window.
+    Prints relative deltas instead of raw times.
+    """
+    def __init__(self, exec_sec: float, logger=None):
+        self.exec_sec = float(exec_sec)
+        self.logger = logger
+        self.last_exec_start = None
+        self.call_idx = 0
+
+    def mark_execution_start(self):
+        self.last_exec_start = time.time()
+
+    def _fmt_delta_ms(self, t_obs: float, t_req: float) -> str:
+        # positive = too early (bad), negative = after execution (good)
+        delta_ms = (t_req - t_obs) * 1000.0
+        return f"{delta_ms:+.1f} ms"
+
+    def check(self, obs: dict):
+        if self.last_exec_start is None:
+            return
+
+        self.call_idx += 1
+        exec_end = self.last_exec_start + self.exec_sec
+
+        ts = obs.get("timestamps", {})
+        joint_time = ts.get("joint_time", None)
+        rgb_time_by_topic = ts.get("rgb_time_by_topic", {})
+
+        problems = []
+
+        if joint_time is not None:
+            delta = exec_end - joint_time
+            if delta > 0:
+                problems.append(
+                    f"joint_state: obs is {self._fmt_delta_ms(joint_time, exec_end)} EARLY"
+                )
+
+        for topic, t in rgb_time_by_topic.items():
+            if t is None:
+                continue
+            delta = exec_end - t
+            if delta > 0:
+                problems.append(
+                    f"rgb[{topic}]: obs is {self._fmt_delta_ms(t, exec_end)} EARLY"
+                )
+
+        if problems:
+            header = (
+                f"[ObsTiming] MID-EXECUTION OBS DETECTED\n"
+                f"  policy_call={self.call_idx}\n"
+                f"  exec_sec={self.exec_sec:.2f}s\n"
+                f"  (positive Δ means obs came BEFORE execution finished)\n"
+            )
+            body = "\n".join(f"  - {p}" for p in problems)
+            msg = header + body
+
+            if self.logger:
+                self.logger.warn(msg)
+            else:
+                print(msg)
 
 # -----------------------------------------------------------------------------
 # Command Sender: publishes JointTrajectory + Twist (reference-based)
@@ -553,26 +768,28 @@ class EvalConfig:
     """
     policy_host: str = "localhost"
     policy_port: int = 5555
-    action_horizon: int = 16
+    action_horizon: int = 32
     lang_instruction: str = "clear the items on the shelf"
     play_sounds: bool = False
     timeout: int = 60  # (kept to match SO100 style; not enforced here)
-
-    # Control loop rate (matches SO100 ~30Hz)
-    control_hz: float = 30.0
     
     # If True: wait until cmd_vel has been received at least once before producing obs
     require_cmd_vel: bool = False
     
+    use_compressed_rgb: bool = False  # subscribe to /compressed topics and decode JPEG/PNG
+    
     # Load ai worker config
     embodiment_config_path: str = "data/jkim50104/ai_worker_config.py" 
     embodiment_config_var: str = "ai_worker"
+    
+    # Visualization
+    viz_rgb: bool = False          # enable RGB visualization windows
+
 
 
 # =============================================================================
 # Main Eval Loop
 # =============================================================================
-
 @draccus.wrap()
 def eval(cfg: EvalConfig):
     """
@@ -608,7 +825,11 @@ def eval(cfg: EvalConfig):
     # 1) Initialize ROS2 + Collector + Sender
     # -------------------------------------------------------------------------
     rclpy.init()
-    collector = AiWorkerObsCollector(enabled_state_keys=state_keys)
+    collector = AiWorkerObsCollector(
+        enabled_state_keys=state_keys,
+        video_keys=video_keys,
+        use_compressed_rgb=cfg.use_compressed_rgb,
+    )
     sender = AiWorkerCommandSender(enabled_action_keys=action_keys)
 
     log_say("Initializing ROS2 collector/sender", cfg.play_sounds, blocking=True)
@@ -634,6 +855,7 @@ def eval(cfg: EvalConfig):
 
     try:
         exec_sec = 1.0  # fixed execution per plan
+        time_checker = ObsExecutionTimeChecker(exec_sec, logger=collector.get_logger())
 
         while rclpy.ok():
             rclpy.spin_once(collector, timeout_sec=0.01)
@@ -643,21 +865,35 @@ def eval(cfg: EvalConfig):
             if obs is None:
                 collector.get_logger().info("Waiting for obs (rgb + joints + optional cmd_vel)...")
                 continue
+            
+            # Check if obs is actually post-execution
+            time_checker.check(obs)
+            
+            # --- RGB visualization (optional) ---
+            if cfg.viz_rgb:
+                display_obs_rgb(obs)
+                    
 
             actions = policy.get_action(obs)  # list length = model horizon
-
-            # Use as many points as we have (or cap if you want)
             action_seq = actions[: cfg.action_horizon]
 
             # Publish joint trajectories that execute over 1 second
             sender.send_action_sequence_1s(action_seq, exec_sec=exec_sec)
+            
+            # Mark when execution started
+            time_checker.mark_execution_start()
 
             # Wait 1 second (keep spinning so joint_states keeps updating)
             t_end = time.time() + exec_sec
             while time.time() < t_end and rclpy.ok():
                 rclpy.spin_once(collector, timeout_sec=0.01)
                 rclpy.spin_once(sender, timeout_sec=0.0)
-                time.sleep(0.005)
+                # time.sleep(0.001)
+            
+            # Wait until we have RGB/joint updates that are >= exec_end
+            ok = collector.wait_until_fresh_after(after_time=t_end, timeout_sec=0.01)
+            if not ok:
+                collector.get_logger().warn("Freshness barrier timed out (RGB likely lagging). Proceeding anyway.")
 
 
     except KeyboardInterrupt:
