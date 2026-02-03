@@ -6,10 +6,22 @@ import sys
 # ---------------------------
 # Config
 # ---------------------------
-REMOTE = "pearl"
+REMOTE = "neuron"  # pearl, turing, lunar, neuron
 
-# Remote base (B)
-BASE_REMOTE = "/home/jokim/projects/Isaac-GR00T/data/jkim50104"
+BASE_REMOTE_MAP = {
+    "pearl":  "/home/jokim/projects/Isaac-GR00T/data/jkim50104",
+    "turing": "/home/jokim/projects/Isaac-GR00T/data/jkim50104",
+    "lunar":  "/home/robi/projects/Isaac-GR00T/data/jkim50104",
+    "neuron": "/home01/hpc197a03/scratch/projects/Isaac-GR00T/data/jkim50104",
+}
+
+try:
+    BASE_REMOTE = BASE_REMOTE_MAP[REMOTE]
+except KeyError:
+    raise ValueError(f"Unknown REMOTE '{REMOTE}'. Choose from {list(BASE_REMOTE_MAP)}")
+
+print(BASE_REMOTE)
+
 
 # Local base (A)
 BASE_LOCAL = Path("data/jkim50104")
