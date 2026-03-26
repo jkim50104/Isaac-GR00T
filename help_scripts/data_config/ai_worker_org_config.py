@@ -17,6 +17,9 @@ ai_worker = {
             "left_gripper",
             "right_arm",
             "right_gripper",
+            "head",
+            "lift",
+            "base",
         ],
     ),
     "action": ModalityConfig(
@@ -26,11 +29,14 @@ ai_worker = {
             "left_gripper",
             "right_arm",
             "right_gripper",
+            "head",
+            "lift",
+            "base",
         ],
         action_configs=[
             # left_arm
             ActionConfig(
-                rep=ActionRepresentation.RELATIVE, # RELATIVE, ABSOLUTE
+                rep=ActionRepresentation.RELATIVE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
             ),
@@ -49,6 +55,24 @@ ai_worker = {
             # right_hand
             ActionConfig(
                 rep=ActionRepresentation.ABSOLUTE,  # G1 hand is controlled by binary signals like a gripper
+                type=ActionType.NON_EEF,
+                format=ActionFormat.DEFAULT,
+            ),
+            # head
+            ActionConfig(
+                rep=ActionRepresentation.ABSOLUTE,
+                type=ActionType.NON_EEF,
+                format=ActionFormat.DEFAULT,
+            ),
+            # lift
+            ActionConfig(
+                rep=ActionRepresentation.ABSOLUTE,
+                type=ActionType.NON_EEF,
+                format=ActionFormat.DEFAULT,
+            ),
+            # base
+            ActionConfig(
+                rep=ActionRepresentation.ABSOLUTE,
                 type=ActionType.NON_EEF,
                 format=ActionFormat.DEFAULT,
             ),
