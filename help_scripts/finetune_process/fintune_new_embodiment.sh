@@ -4,9 +4,9 @@ set -euo pipefail
 SERVER="$(hostname -s)"
 
 # Global finetune settings
-USE_WRIST_VIEW=false
+USE_WRIST_VIEW=true
 ARM_ONLY=true
-ACTION_REP=ABS  # "ABS" or "REL"
+ACTION_REP=REL  # "ABS" or "REL"
 
 # ---- args: CUDA devices ----
 if [[ $# -lt 1 ]]; then
@@ -61,12 +61,12 @@ fi
 
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_NAME="sim_pick_pringles" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
+DATASET_NAME="ffw_sg2_rev1_tidy" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
 DATASET_PATH="./data/jkim50104/$DATASET_NAME"
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
-HYPER_PARAMS="LONG_G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
+HYPER_PARAMS="G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
 
 if [[ "${ARM_ONLY}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
@@ -82,6 +82,12 @@ export GR00T_ACTION_REP="${ACTION_REP}"
 
 # Config check
 bash help_scripts/data_config/config_check.sh "./help_scripts/data_config/${CONFIG}" --strict
+
+# Auto-link modality.json if missing
+if [[ ! -f "${DATASET_PATH}/meta/modality.json" ]]; then
+  echo "[INFO] modality.json not found in ${DATASET_PATH}/meta/, running link_modality.py ..."
+  python help_scripts/data_config/link_modality.py
+fi
 
 echo "================= FINETUNE NEW EMBODIMENT ================="
 echo "SERVER=${SERVER}"
@@ -100,7 +106,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
   --output-dir "./output/${DATASET_NAME}/${HYPER_PARAMS}" \
   --save-total-limit 2 \
   --save-steps 10000 \
-  --max-steps 300000 \
+  --max-steps 30000 \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
