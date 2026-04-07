@@ -34,8 +34,16 @@ uv pip install -e .
 uv pip uninstall torch torchvision torchaudio
 uv pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128
 
-# ffmpeg required for torchcodec:
-# sudo apt install ffmpeg
+# ffmpeg required for torchcodec
+if ! command -v ffmpeg &>/dev/null; then
+    echo ""
+    echo "=========================================="
+    echo "WARNING: ffmpeg not found!"
+    echo "torchcodec requires ffmpeg to load video data."
+    echo "Install it with: sudo apt install ffmpeg"
+    echo "=========================================="
+    echo ""
+fi
 
 # Detect Ubuntu 20.04
 if grep -q "20.04" /etc/os-release 2>/dev/null; then
