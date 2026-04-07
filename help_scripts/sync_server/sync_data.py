@@ -27,12 +27,12 @@ def run(cmd: list[str]) -> None:
 def ssh_lines(cmd: str) -> list[str]:
     try:
         out = subprocess.check_output(
-            ["ssh", server, cmd],
+            ["ssh", REMOTE, cmd],
             text=True,
             stderr=subprocess.STDOUT,
         )
     except subprocess.CalledProcessError as e:
-        print(f"[SSH ERROR] {server}: {cmd}\n{e.output}")
+        print(f"[SSH ERROR] {REMOTE}: {cmd}\n{e.output}")
         return []
     return [line.strip() for line in out.splitlines() if line.strip()]
 
@@ -45,7 +45,7 @@ def list_remote_dirs(path: str) -> list[str]:
         f'cd "{path}" 2>/dev/null || exit 0; '
         f'for x in *; do [ -d "$x" ] && echo "$x"; done'
     )
-    dirs = ssh_lines(server, cmd)
+    dirs = ssh_lines(cmd)
     dirs.sort()
     return dirs
 
