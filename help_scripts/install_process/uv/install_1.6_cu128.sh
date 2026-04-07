@@ -5,7 +5,14 @@ set -e
 # GPU: A100(sm8.0), A6000(sm8.6), RTX PRO 6000 Blackwell(sm12.0)
 # Requires: CUDA 12.8 toolkit installed on the system, uv v0.8.4+
 #
-# Usage: bash help_scripts/install_process/uv/install_1.6_cu128.sh
+# Usage: bash help_scripts/install_process/uv/install_1.6_cu128.sh [--clean]
+
+# Clean start: remove existing .venv
+if [[ "${1:-}" == "--clean" ]]; then
+    echo "Removing existing .venv..."
+    rm -rf .venv
+    echo "Clean start."
+fi
 
 # Check uv is installed
 if ! command -v uv &>/dev/null; then
