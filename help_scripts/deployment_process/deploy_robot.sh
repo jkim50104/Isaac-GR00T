@@ -6,7 +6,7 @@
 #   bash help_scripts/deployment_process/deploy_robot.sh --gui        # GUI mode
 
 set -euo pipefail
-
+source .venv/bin/activate
 
 # ======================== CONFIG ========================
 MODEL_PATH="output/ffw_sg2_rev1_pick_item/G4_B256_REL_AO_WR/checkpoint-20000"
