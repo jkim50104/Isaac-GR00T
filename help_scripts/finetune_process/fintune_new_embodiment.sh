@@ -4,22 +4,21 @@ source .venv/bin/activate
 
 SERVER="$(hostname -s)"
 
-# ---- Change these per run ----
-DATASET_NAME="ffw_sg2_rev1_pick_item" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
-
 # Global finetune settings
 USE_WRIST_VIEW=true
 ARM_ONLY=true
 ACTION_REP=REL  # "ABS" or "REL"
 
-# ---- args: CUDA devices ----
+# ---- args ----
+DATASET_PREFIX="ffw_sg2_rev1_"
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <cuda_visible_devices>"
-  echo "Example (4 GPUs): $0 0,1,2,3"
-  echo "Example (1 GPU):  $0 0"
+  echo "Usage: $0 <task_name> [cuda_visible_devices]"
+  echo "Example: $0 pick_item          # GPUs default to 0,1,2,3"
+  echo "Example: $0 pick_item 0        # single GPU"
   exit 1
 fi
-CUDA_DEVICES="$1"
+DATASET_NAME="${DATASET_PREFIX}$1"
+CUDA_DEVICES="${2:-0,1,2,3}"
 export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
 
 # Count devices from comma-separated list (pure bash)
@@ -65,8 +64,14 @@ fi
 
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_NAME="ffw_sg2_rev1_pick_item" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
 DATASET_PATH="./data/jkim50104/$DATASET_NAME"
+
+if [[ ! -d "${DATASET_PATH}" ]]; then
+  echo "ERROR: Dataset not found: ${DATASET_PATH}"
+  echo "Available datasets:"
+  ls -1 ./data/jkim50104/ 2>/dev/null | grep "^${DATASET_PREFIX}" | sed "s/^${DATASET_PREFIX}/  /"
+  exit 1
+fi
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
