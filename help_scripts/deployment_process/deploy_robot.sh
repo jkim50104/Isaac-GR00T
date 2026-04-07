@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+source .venv/bin/activate
 # Deploy robot
 CONFIG_PATH="help_scripts/data_config/ai_worker_arm_only_config.py" # ai_worker_config, ai_worker_arm_only_config
 

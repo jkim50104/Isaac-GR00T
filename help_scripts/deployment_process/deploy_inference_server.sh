@@ -1,3 +1,5 @@
+#!/usr/bin/env bash
+source .venv/bin/activate
 # Start inference vla server with trained checkpoint
 # python gr00t/eval/run_gr00t_server.py --embodiment-tag GR1 --model-path nvidia/GR00T-N1.6-3B
 

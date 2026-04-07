@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+source .venv/bin/activate
+
 # Add ai_worker_modality.json file for AI worker collected data -> move the file to the data meta with modality.json name
 
 # Created ai_worker_config.py to register the new embodiment configuration
