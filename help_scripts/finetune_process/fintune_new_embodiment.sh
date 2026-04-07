@@ -65,6 +65,7 @@ fi
 
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
+DATASET_NAME="ffw_sg2_rev1_pick_item" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
 DATASET_PATH="./data/jkim50104/$DATASET_NAME"
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
@@ -96,7 +97,14 @@ echo "================= FINETUNE NEW EMBODIMENT ================="
 echo "SERVER=${SERVER}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "NUM_GPUS=${NUM_GPUS}"
+REF_BATCH=256
+REF_MAX_STEPS=30000
+REF_SAVE_STEPS=10000
+MAX_STEPS=$(( REF_MAX_STEPS * REF_BATCH / BATCH_SIZE ))
+SAVE_STEPS=$(( REF_SAVE_STEPS * REF_BATCH / BATCH_SIZE ))
+
 echo "GLOBAL_BATCH_SIZE=${BATCH_SIZE}"
+echo "MAX_STEPS=${MAX_STEPS}  SAVE_STEPS=${SAVE_STEPS}"
 echo "OUT=./output/${DATASET_NAME}/${HYPER_PARAMS}"
 
 torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
@@ -107,9 +115,9 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
   --modality-config-path "./help_scripts/data_config/${CONFIG}" \
   --num-gpus "${NUM_GPUS}" \
   --output-dir "./output/${DATASET_NAME}/${HYPER_PARAMS}" \
-  --save-total-limit 3 \
-  --save-steps 5000 \
-  --max-steps 30000 \
+  --save-total-limit 2 \
+  --save-steps "${SAVE_STEPS}" \
+  --max-steps "${MAX_STEPS}" \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
