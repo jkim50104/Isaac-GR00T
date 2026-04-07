@@ -1,3 +1,6 @@
+#!/usr/bin/env bash
+source .venv/bin/activate
+
 CKPT="output/ffw_sg2_rev1_base_drive_test/G4_B512_REL/checkpoint-10000"
 
 python gr00t/eval/open_loop_eval.py \

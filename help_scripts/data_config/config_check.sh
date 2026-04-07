@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source .venv/bin/activate
 
 if [[ $# -lt 1 ]]; then
   echo "Usage: $0 <path/to/modality_config.py> [--strict]"
