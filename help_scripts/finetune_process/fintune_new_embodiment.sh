@@ -32,7 +32,7 @@ case "${SERVER}" in
     ulimit -n 65535 || true
     BATCH_SIZE=512
     ;;
-  *turing*)
+  *turing*|*rosenblatt*)
     BATCH_SIZE=256
     ;;
   *lunar*)
