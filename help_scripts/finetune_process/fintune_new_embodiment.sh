@@ -4,6 +4,9 @@ source .venv/bin/activate
 
 SERVER="$(hostname -s)"
 
+# ---- Change these per run ----
+DATASET_NAME="ffw_sg2_rev1_pick_item" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
+
 # Global finetune settings
 USE_WRIST_VIEW=true
 ARM_ONLY=true
@@ -62,7 +65,6 @@ fi
 
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_NAME="ffw_sg2_rev1_tidy" #ffw_sg2_rev1_pick_bowl sim_pick_pringles
 DATASET_PATH="./data/jkim50104/$DATASET_NAME"
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
@@ -105,8 +107,8 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
   --modality-config-path "./help_scripts/data_config/${CONFIG}" \
   --num-gpus "${NUM_GPUS}" \
   --output-dir "./output/${DATASET_NAME}/${HYPER_PARAMS}" \
-  --save-total-limit 2 \
-  --save-steps 10000 \
+  --save-total-limit 3 \
+  --save-steps 5000 \
   --max-steps 30000 \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \

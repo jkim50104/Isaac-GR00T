@@ -7,8 +7,13 @@ set -e
 #
 # Usage: bash help_scripts/install_process/uv/install_1.6_cu128.sh
 
-# Install uv if not present
-# curl -LsSf https://astral.sh/uv/install.sh | sh
+# Check uv is installed
+if ! command -v uv &>/dev/null; then
+    echo "Error: uv is not installed."
+    echo "Install it with:"
+    echo "  curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
 
 # Run from the Isaac-GR00T repo root
 # git submodule update --init --recursive
@@ -66,7 +71,7 @@ print(f'GPU count:    {torch.cuda.device_count()}')
 import flash_attn
 print(f'flash-attn:   {flash_attn.__version__}')
 
-from gr00t.model.gr00t_n1d6 import GR00TN1D6Policy
+from gr00t.model.gr00t_n1d6.gr00t_n1d6 import Gr00tN1d6
 print(f'GR00T N1.6:   OK')
 
 print()
