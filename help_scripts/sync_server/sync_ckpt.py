@@ -3,7 +3,7 @@ import subprocess
 from pathlib import Path
 import sys
 
-REMOTE = "pearl"
+REMOTE = "turing"
 BASE_LOCAL = Path("output") # Run from workspace
 BASE_REMOTE = "/home/jokim/projects/Isaac-GR00T/output"
 

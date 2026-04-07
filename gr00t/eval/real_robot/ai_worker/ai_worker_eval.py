@@ -65,6 +65,7 @@ import logging
 from pprint import pformat
 import os
 import importlib.util
+import yaml
 
 
 from gr00t.policy.server_client import PolicyClient
@@ -76,6 +77,82 @@ except ImportError as e:
     raise ImportError(
         "cv_bridge is required. Install (Ubuntu/ROS2): sudo apt install ros-${ROS_DISTRO}-cv-bridge"
     ) from e
+
+
+# -----------------------------------------------------------------------------
+# Checkpoint config parser (shared by headless + GUI)
+# -----------------------------------------------------------------------------
+
+class _SafeIgnoreLoader(yaml.SafeLoader):
+    pass
+
+
+def _ignore_unknown(loader, tag_suffix, node):
+    if isinstance(node, yaml.MappingNode):
+        return loader.construct_mapping(node, deep=True)
+    elif isinstance(node, yaml.SequenceNode):
+        return loader.construct_sequence(node, deep=True)
+    return loader.construct_scalar(node)
+
+
+_SafeIgnoreLoader.add_multi_constructor(
+    "tag:yaml.org,2002:python/", _ignore_unknown
+)
+
+
+def parse_checkpoint_config(checkpoint_path):
+    """
+    Parse experiment_cfg/config.yaml from a checkpoint directory.
+    Returns dict with video_keys, state_keys, action_keys, language_key,
+    action_rep, dataset_path, arm_only, use_wrist_view.
+    """
+    if not os.path.isabs(checkpoint_path):
+        checkpoint_path = os.path.join(os.getcwd(), checkpoint_path)
+
+    config_path = os.path.join(checkpoint_path, "experiment_cfg", "config.yaml")
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(f"Config not found: {config_path}")
+
+    with open(config_path) as f:
+        cfg = yaml.load(f, Loader=_SafeIgnoreLoader)
+
+    modality = cfg["data"]["modality_configs"]["new_embodiment"]
+    video_keys = modality["video"]["modality_keys"]
+    state_keys = modality["state"]["modality_keys"]
+    action_keys = modality["action"]["modality_keys"]
+    language_keys = modality["language"]["modality_keys"]
+    language_key = (
+        language_keys[0]
+        if language_keys
+        else "annotation.human.action.task_description"
+    )
+
+    action_configs = modality["action"].get("action_configs", [])
+    action_rep = "REL"
+    if action_configs:
+        first_rep = action_configs[0].get("rep", "relative")
+        if isinstance(first_rep, list):
+            first_rep = first_rep[0]
+        action_rep = "REL" if "relative" in str(first_rep).lower() else "ABS"
+
+    dataset_path = cfg["data"]["datasets"][0]["dataset_paths"][0]
+    arm_only = "head" not in state_keys
+    use_wrist_view = "left_wrist_view" in video_keys
+
+    delta_indices = modality["action"].get("delta_indices", [])
+    action_horizon = len(delta_indices) if delta_indices else 16
+
+    return {
+        "video_keys": video_keys,
+        "state_keys": state_keys,
+        "action_keys": action_keys,
+        "language_key": language_key,
+        "action_rep": action_rep,
+        "dataset_path": dataset_path,
+        "arm_only": arm_only,
+        "use_wrist_view": use_wrist_view,
+        "action_horizon": action_horizon,
+    }
 
 
 # -----------------------------------------------------------------------------
@@ -95,77 +172,56 @@ def recursive_add_extra_dim(obs: Dict) -> Dict:
             obs[key] = [val]
     return obs
 
-def display_obs_rgb(
-    obs: Dict[str, Any],
+def concat_obs_rgb(
+    rgb,
     scale: float = 1.0,
-    win_name: str = "rgb_concat",
-    # Prefer key-based order now (matches your mental model)
     key_order=("left_wrist_view", "ego_view", "right_wrist_view"),
-) -> None:
+):
     """
-    Visualize obs["rgb"] as a single concatenated view.
+    Concatenate RGB images into a single ndarray.
 
-    Supports:
-      - obs["rgb"] as dict: {camera_key: np.uint8(H,W,3) RGB}
-      - obs["rgb"] as list/tuple (legacy): [img0, img1, ...]
+    Accepts:
+      - dict: {camera_key: np.uint8(H,W,3) RGB}
+      - list/tuple: [img0, img1, ...]
 
-    - Expects each rgb image as uint8 RGB (H,W,3).
-    - Converts to BGR for cv2.imshow.
-    - Resizes images to same height before concatenation.
+    Returns concatenated RGB ndarray, or None if no valid images.
     """
-    if obs is None or "rgb" not in obs:
-        return
+    if rgb is None:
+        return None
 
-    rgb = obs["rgb"]
-
-    # ---- Normalize to an ordered list of images ----
     if isinstance(rgb, dict):
         if len(rgb) == 0:
-            return
-
-        # Use key_order first, then any remaining keys (stable)
+            return None
         ordered_keys = [k for k in key_order if k in rgb]
         for k in rgb.keys():
             if k not in ordered_keys:
                 ordered_keys.append(k)
-
         rgb_list = [rgb.get(k, None) for k in ordered_keys]
 
     elif isinstance(rgb, (list, tuple)):
         if len(rgb) == 0:
-            return
+            return None
         rgb_list = list(rgb)
-
     else:
-        return
+        return None
 
-    # ---- Filter/scale ----
     imgs = []
     for img in rgb_list:
         if img is None:
             continue
         if not isinstance(img, np.ndarray) or img.ndim != 3 or img.shape[2] != 3:
             continue
-
         if scale != 1.0:
             h, w = img.shape[:2]
             img = cv2.resize(img, (max(1, int(w * scale)), max(1, int(h * scale))))
-
         imgs.append(img)
 
     if len(imgs) == 0:
-        return
-
-    # ---- Show ----
+        return None
     if len(imgs) == 1:
-        bgr = cv2.cvtColor(imgs[0], cv2.COLOR_RGB2BGR)
-        cv2.imshow(win_name, bgr)
-        cv2.waitKey(1)
-        return
+        return imgs[0]
 
-    # Match heights (no upscaling)
-    heights = [im.shape[0] for im in imgs]
-    target_h = min(heights)
+    target_h = min(im.shape[0] for im in imgs)
     resized = []
     for im in imgs:
         h, w = im.shape[:2]
@@ -174,10 +230,8 @@ def display_obs_rgb(
             im = cv2.resize(im, (new_w, target_h))
         resized.append(im)
 
-    concat_rgb = cv2.hconcat(resized)
-    concat_bgr = cv2.cvtColor(concat_rgb, cv2.COLOR_RGB2BGR)
-    cv2.imshow(win_name, concat_bgr)
-    cv2.waitKey(1)
+    return cv2.hconcat(resized)
+
 
 
 # -----------------------------------------------------------------------------
@@ -252,6 +306,17 @@ JOINTS_BY_KEY: Dict[str, List[str]] = {
 
 # Base dims are always [lin.x, lin.y, ang.z]
 BASE_DIM = 3
+
+# Dims needed for slicing state_vec into blocks
+DIMS_BY_KEY = {
+    "left_arm": 7,
+    "left_gripper": 1,
+    "right_arm": 7,
+    "right_gripper": 1,
+    "head": 2,
+    "lift": 1,
+    # base handled as BASE_DIM internally
+}
 
 
 # -----------------------------------------------------------------------------
@@ -768,8 +833,8 @@ class EvalConfig:
     """
     policy_host: str = "localhost"
     policy_port: int = 5555
-    action_horizon: int = 32
-    lang_instruction: str = "clear the items on the shelf"
+    action_horizon: int = 16
+    lang_instruction: str = ""
     play_sounds: bool = False
     timeout: int = 60  # (kept to match SO100 style; not enforced here)
     
@@ -778,52 +843,160 @@ class EvalConfig:
     
     use_compressed_rgb: bool = False  # subscribe to /compressed topics and decode JPEG/PNG
     
-    # Load ai worker config
-    embodiment_config_path: str = "data/jkim50104/ai_worker_config.py" 
+    # Checkpoint path — used to derive modality config + dataset path
+    checkpoint_path: str = ""
+
+    # Fallback: legacy embodiment config file (used only if checkpoint_path is empty)
+    embodiment_config_path: str = ""
     embodiment_config_var: str = "ai_worker"
-    
-    # Visualization
-    viz_rgb: bool = False          # enable RGB visualization windows
+
 
 
 
 # =============================================================================
-# Main Eval Loop
+# Reusable Eval Loop (used by both headless and GUI)
+# =============================================================================
+
+def run_eval_loop(
+    collector,
+    sender,
+    adapter,
+    lang_instruction,
+    action_horizon=16,
+    exec_sec=1.0,
+    require_cmd_vel=False,
+    should_stop=None,
+    on_obs=None,
+    on_status=None,
+    get_action_horizon=None,
+):
+    """
+    Core eval loop shared by headless and GUI modes.
+
+    Args:
+        collector: AiWorkerObsCollector
+        sender: AiWorkerCommandSender
+        adapter: AiWorkerAdapter
+        lang_instruction: language command string
+        action_horizon: default number of action steps
+        exec_sec: seconds per action chunk execution
+        require_cmd_vel: wait for cmd_vel before building obs
+        should_stop: () -> bool, checked each iteration
+        on_obs: (obs_dict) -> None, called when obs is built
+        on_status: (str) -> None, called with status messages
+        get_action_horizon: () -> int, for dynamic horizon (e.g. GUI slider)
+    """
+    if should_stop is None:
+        should_stop = lambda: False
+
+    time_checker = ObsExecutionTimeChecker(exec_sec, logger=collector.get_logger())
+    _last_wait_log = 0.0
+
+    while rclpy.ok() and not should_stop():
+        rclpy.spin_once(collector, timeout_sec=0.01)
+        rclpy.spin_once(sender, timeout_sec=0.0)
+
+        obs = collector.build_obs(lang_instruction, require_cmd_vel=require_cmd_vel)
+        if obs is None:
+            now = time.time()
+            if on_status:
+                on_status("Waiting for obs...")
+            elif now - _last_wait_log >= 1.0:
+                print(f"\r[INFO] Waiting for obs... ({time.strftime('%H:%M:%S')})", end="", flush=True)
+                _last_wait_log = now
+            continue
+
+        time_checker.check(obs)
+
+        if on_obs:
+            on_obs(obs)
+
+        if should_stop():
+            break
+
+        if on_status:
+            on_status("Running inference...")
+
+        horizon = get_action_horizon() if get_action_horizon else action_horizon
+        actions = adapter.get_action(obs)
+        action_seq = actions[:horizon]
+
+        if should_stop():
+            break
+
+        sender.send_action_sequence_1s(action_seq, exec_sec=exec_sec)
+        time_checker.mark_execution_start()
+
+        if on_status:
+            on_status("Executing actions...")
+
+        t_end = time.time() + exec_sec
+        while time.time() < t_end and rclpy.ok() and not should_stop():
+            rclpy.spin_once(collector, timeout_sec=0.01)
+            rclpy.spin_once(sender, timeout_sec=0.0)
+
+        if not should_stop():
+            ok = collector.wait_until_fresh_after(after_time=t_end, timeout_sec=0.01)
+            if not ok:
+                collector.get_logger().warn(
+                    "Freshness barrier timed out (RGB likely lagging). Proceeding anyway."
+                )
+
+
+# =============================================================================
+# Headless CLI Entry Point
 # =============================================================================
 @draccus.wrap()
 def eval(cfg: EvalConfig):
-    """
-    Main entry point for ai_worker policy evaluation (ROS2).
-    """
+    """Headless ai_worker policy evaluation (ROS2)."""
     init_logging()
     logging.info(pformat(asdict(cfg)))
 
-    # -------------------------------------------------------------------------
-    # 0) Load embodiment config dict (ai_worker)
-    # -------------------------------------------------------------------------
-    emb_cfg = load_embodiment_cfg_from_path(cfg.embodiment_config_path, cfg.embodiment_config_var)
+    # Load modality config from checkpoint or legacy config file
+    if cfg.checkpoint_path:
+        ckpt_config = parse_checkpoint_config(cfg.checkpoint_path)
+        video_keys = ckpt_config["video_keys"]
+        state_keys = ckpt_config["state_keys"]
+        action_keys = ckpt_config["action_keys"]
+        language_key = ckpt_config["language_key"]
+        dataset_path = ckpt_config["dataset_path"]
+        if dataset_path and not os.path.isabs(dataset_path):
+            dataset_path = os.path.normpath(os.path.join(os.getcwd(), dataset_path))
+        logging.info(f"Config from checkpoint: video={video_keys}, state={state_keys}, action={action_keys}")
+    elif cfg.embodiment_config_path:
+        emb_cfg = load_embodiment_cfg_from_path(cfg.embodiment_config_path, cfg.embodiment_config_var)
+        video_keys = get_modality_keys(emb_cfg, "video")
+        state_keys = get_modality_keys(emb_cfg, "state")
+        action_keys = get_modality_keys(emb_cfg, "action")
+        lang_keys = get_modality_keys(emb_cfg, "language")
+        language_key = lang_keys[0] if len(lang_keys) > 0 else "annotation.human.action.task_description"
+        dataset_path = ""
+    else:
+        raise ValueError("Either --checkpoint_path or --embodiment_config_path must be provided")
 
+    # Load init_pose module
+    _init_mod = None
+    if dataset_path:
 
-    video_keys = get_modality_keys(emb_cfg, "video")
-    state_keys = get_modality_keys(emb_cfg, "state")
-    action_keys = get_modality_keys(emb_cfg, "action")
-    lang_keys = get_modality_keys(emb_cfg, "language")
-    language_key = lang_keys[0] if len(lang_keys) > 0 else "annotation.human.action.task_description"
+        _init_mod_path = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)),
+            "..", "..", "..", "..",
+            "help_scripts", "deployment_process", "init_pose_from_data.py",
+        ))
+        _init_spec = importlib.util.spec_from_file_location("init_pose_from_data", _init_mod_path)
+        _init_mod = importlib.util.module_from_spec(_init_spec)
+        _init_spec.loader.exec_module(_init_mod)
 
-    # dims needed only for slicing state_vec into blocks
-    dims_by_key = {
-        "left_arm": 7,
-        "left_gripper": 1,
-        "right_arm": 7,
-        "right_gripper": 1,
-        "head": 2,
-        "lift": 1,
-        # base handled as 3 internally
-    }
+    # If no lang instruction given, read from dataset
+    lang_instruction = cfg.lang_instruction
+    if not lang_instruction and _init_mod and dataset_path:
+        lang_instruction = _init_mod.get_lang_instruction(dataset_path) or ""
+        if lang_instruction:
+            logging.info(f"Using language instruction from dataset: \"{lang_instruction}\"")
+    if not lang_instruction:
+        lang_instruction = "pick the blue bowl"
+        logging.warning(f"No language instruction provided, using default: \"{lang_instruction}\"")
 
-    # -------------------------------------------------------------------------
-    # 1) Initialize ROS2 + Collector + Sender
-    # -------------------------------------------------------------------------
     rclpy.init()
     collector = AiWorkerObsCollector(
         enabled_state_keys=state_keys,
@@ -834,68 +1007,66 @@ def eval(cfg: EvalConfig):
 
     log_say("Initializing ROS2 collector/sender", cfg.play_sounds, blocking=True)
 
-    # -------------------------------------------------------------------------
-    # 2) Initialize Policy Client + Adapter
-    # -------------------------------------------------------------------------
-    policy_client = PolicyClient(host=cfg.policy_host, port=cfg.policy_port)
-    policy = AiWorkerAdapter(
-        policy_client=policy_client,
+    adapter = AiWorkerAdapter(
+        policy_client=PolicyClient(host=cfg.policy_host, port=cfg.policy_port),
         state_keys=state_keys,
         action_keys=action_keys,
         video_keys=video_keys,
         language_key=language_key,
-        dims_by_key=dims_by_key,
+        dims_by_key=DIMS_BY_KEY,
     )
 
-    log_say(
-        f'Policy ready with instruction: "{cfg.lang_instruction}"',
-        cfg.play_sounds,
-        blocking=True,
-    )
+    log_say(f'Policy ready: "{lang_instruction}"', cfg.play_sounds, blocking=True)
+
+    # Init pose reset (once at startup)
+    if _init_mod and dataset_path:
+        logging.info(f"Running init pose from dataset: {dataset_path}")
+
+        # Spin until we have joint states
+        for _ in range(500):  # ~5s max
+            rclpy.spin_once(collector, timeout_sec=0.01)
+            if collector.joint_map:
+                break
+
+        if not collector.joint_map:
+            logging.warning("No joint states received — skipping init pose")
+        else:
+            positions, ref_ep, ep_lang = _init_mod.compute_init_pose(dataset_path)
+            if ep_lang and not lang_instruction:
+                lang_instruction = ep_lang
+                logging.info(f"Using language from episode {ref_ep}: \"{lang_instruction}\"")
+
+            max_attempts = 5
+            for attempt in range(1, max_attempts + 1):
+                logging.info(f"Sending robot to init pose (ep {ref_ep}, attempt {attempt})...")
+                _init_mod.send_init_pose(sender, collector.joint_map, positions)
+
+                t_wait_end = time.time() + 3.0
+                while time.time() < t_wait_end and rclpy.ok():
+                    rclpy.spin_once(collector, timeout_sec=0.01)
+                    rclpy.spin_once(sender, timeout_sec=0.0)
+
+                reached, max_err, worst = _init_mod.check_init_pose_reached(
+                    collector.joint_map, positions
+                )
+                if reached:
+                    logging.info(f"Init pose reached (attempt {attempt}, err={max_err:.4f})")
+                    break
+                logging.warning(f"Not at init pose (err={max_err:.4f} @ {worst}), retrying...")
+            else:
+                logging.warning(f"Init pose not reached after {max_attempts} attempts (err={max_err:.4f} @ {worst})")
+
+    input("\nPress Enter to start eval loop...")
 
     try:
-        exec_sec = 1.0  # fixed execution per plan
-        time_checker = ObsExecutionTimeChecker(exec_sec, logger=collector.get_logger())
-
-        while rclpy.ok():
-            rclpy.spin_once(collector, timeout_sec=0.01)
-            rclpy.spin_once(sender, timeout_sec=0.0)
-
-            obs = collector.build_obs(cfg.lang_instruction, require_cmd_vel=cfg.require_cmd_vel)
-            if obs is None:
-                collector.get_logger().info("Waiting for obs (rgb + joints + optional cmd_vel)...")
-                continue
-            
-            # Check if obs is actually post-execution
-            time_checker.check(obs)
-            
-            # --- RGB visualization (optional) ---
-            if cfg.viz_rgb:
-                display_obs_rgb(obs)
-                    
-
-            actions = policy.get_action(obs)  # list length = model horizon
-            action_seq = actions[: cfg.action_horizon]
-
-            # Publish joint trajectories that execute over 1 second
-            sender.send_action_sequence_1s(action_seq, exec_sec=exec_sec)
-            
-            # Mark when execution started
-            time_checker.mark_execution_start()
-
-            # Wait 1 second (keep spinning so joint_states keeps updating)
-            t_end = time.time() + exec_sec
-            while time.time() < t_end and rclpy.ok():
-                rclpy.spin_once(collector, timeout_sec=0.01)
-                rclpy.spin_once(sender, timeout_sec=0.0)
-                # time.sleep(0.001)
-            
-            # Wait until we have RGB/joint updates that are >= exec_end
-            ok = collector.wait_until_fresh_after(after_time=t_end, timeout_sec=0.01)
-            if not ok:
-                collector.get_logger().warn("Freshness barrier timed out (RGB likely lagging). Proceeding anyway.")
-
-
+        run_eval_loop(
+            collector=collector,
+            sender=sender,
+            adapter=adapter,
+            lang_instruction=lang_instruction,
+            action_horizon=cfg.action_horizon,
+            require_cmd_vel=cfg.require_cmd_vel,
+        )
     except KeyboardInterrupt:
         pass
     finally:
