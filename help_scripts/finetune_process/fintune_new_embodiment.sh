@@ -5,18 +5,37 @@ source .venv/bin/activate
 SERVER="$(hostname -s)"
 
 # Global finetune settings
-USE_WRIST_VIEW=true
+USE_WRIST_VIEW=false
 ARM_ONLY=true
 ACTION_REP=REL  # "ABS" or "REL"
 
 # ---- args ----
-DATASET_PREFIX="ffw_sg2_rev1_"
+SIM_MODE=false
+POSITIONAL=()
+for arg in "$@"; do
+  case "$arg" in
+    --sim) SIM_MODE=true ;;
+    *)     POSITIONAL+=("$arg") ;;
+  esac
+done
+set -- "${POSITIONAL[@]}"
+
 if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 <task_name> [cuda_visible_devices]"
-  echo "Example: $0 pick_item          # GPUs default to 0,1,2,3"
-  echo "Example: $0 pick_item 0        # single GPU"
+  echo "Usage: $0 [--sim] <task_name> [cuda_visible_devices]"
+  echo "Example: $0 pick_item               # real data, GPUs default to 0,1,2,3"
+  echo "Example: $0 pick_item 0             # single GPU"
+  echo "Example: $0 --sim table_pnp         # sim data (ACS_ROBI)"
   exit 1
 fi
+
+if [[ "${SIM_MODE}" == "true" ]]; then
+  DATASET_PREFIX="sim_ffw_sg2_"
+  DATA_ROOT="./data/ACS_ROBI"
+else
+  DATASET_PREFIX="ffw_sg2_rev1_"
+  DATA_ROOT="./data/jkim50104"
+fi
+
 DATASET_NAME="${DATASET_PREFIX}$1"
 CUDA_DEVICES="${2:-0,1,2,3}"
 export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
@@ -64,18 +83,18 @@ fi
 
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
-DATASET_PATH="./data/jkim50104/$DATASET_NAME"
+DATASET_PATH="${DATA_ROOT}/${DATASET_NAME}"
 
 if [[ ! -d "${DATASET_PATH}" ]]; then
   echo "ERROR: Dataset not found: ${DATASET_PATH}"
   echo "Available datasets:"
-  ls -1 ./data/jkim50104/ 2>/dev/null | grep "^${DATASET_PREFIX}" | sed "s/^${DATASET_PREFIX}/  /"
+  ls -1 "${DATA_ROOT}/" 2>/dev/null | grep "^${DATASET_PREFIX}" | sed "s/^${DATASET_PREFIX}/  /"
   exit 1
 fi
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
-HYPER_PARAMS="G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
+HYPER_PARAMS="LONG_G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
 
 if [[ "${ARM_ONLY}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
@@ -93,9 +112,11 @@ export GR00T_ACTION_REP="${ACTION_REP}"
 bash help_scripts/data_config/config_check.sh "./help_scripts/data_config/${CONFIG}" --strict
 
 # Auto-link modality.json if missing
-if [[ ! -f "${DATASET_PATH}/meta/modality.json" ]]; then
-  echo "[INFO] modality.json not found in ${DATASET_PATH}/meta/, running link_modality.py ..."
-  python help_scripts/data_config/link_modality.py
+MODALITY_LINK="${DATASET_PATH}/meta/modality.json"
+MODALITY_TARGET="$(pwd)/help_scripts/data_config/ai_worker_modality.json"
+if [[ ! -f "${MODALITY_LINK}" ]]; then
+  echo "[INFO] modality.json not found in ${DATASET_PATH}/meta/, creating symlink ..."
+  ln -sf "${MODALITY_TARGET}" "${MODALITY_LINK}"
 fi
 
 echo "================= FINETUNE NEW EMBODIMENT ================="
@@ -103,7 +124,7 @@ echo "SERVER=${SERVER}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "NUM_GPUS=${NUM_GPUS}"
 REF_BATCH=256
-REF_MAX_STEPS=30000
+REF_MAX_STEPS=300000
 REF_SAVE_STEPS=5000
 MAX_STEPS=$(( REF_MAX_STEPS * REF_BATCH / BATCH_SIZE ))
 SAVE_STEPS=$(( REF_SAVE_STEPS * REF_BATCH / BATCH_SIZE ))
