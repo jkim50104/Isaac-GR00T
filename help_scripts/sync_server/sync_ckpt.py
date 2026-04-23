@@ -3,9 +3,16 @@ import subprocess
 from pathlib import Path
 import sys
 
-REMOTE = "turing"
-BASE_LOCAL = Path("output") # Run from workspace
-BASE_REMOTE = "/home/jokim/projects/Isaac-GR00T/output"
+SERVERS = {
+    "turing": "/home/jokim/projects/Isaac-GR00T/output",
+    "rosen": "/home/jokim/project/Isaac-GR00T/output",
+    "pearl": "/home/jokim/projects/Isaac-GR00T/output",
+    "lunar":  "/home/robi/projects/Isaac-GR00T/output",
+}
+
+BASE_LOCAL = Path("output")  # Run from workspace
+REMOTE: str = ""       # SSH host alias, set by main() from SERVERS
+BASE_REMOTE: str = ""  # Remote checkpoint dir, set by main() from SERVERS
 
 # IMPORTANT: your remote has ffw_* dirs. If you filter only ai_worker_*, you'll see nothing.
 # None => include all. Or e.g. ("ffw_", "ai_worker_")
@@ -169,13 +176,30 @@ def confirm(prompt: str) -> bool:
 
 
 def main():
+    if len(sys.argv) < 2:
+        print("Usage: sync_ckpt.py <server>")
+        print("\nAvailable servers:")
+        for name, path in SERVERS.items():
+            print(f"  {name:<12} {path}")
+        sys.exit(0)
+
+    server = sys.argv[1]
+    if server not in SERVERS:
+        print(f"Unknown server: {server}")
+        print(f"Available: {', '.join(SERVERS)}")
+        sys.exit(1)
+
+    global REMOTE, BASE_REMOTE
+    REMOTE = server
+    BASE_REMOTE = SERVERS[server]
+
     remote_exps = list_remote_experiments()
 
-    print(f"[DEBUG] REMOTE={REMOTE}")
-    print(f"[DEBUG] BASE_REMOTE={BASE_REMOTE}")
-    print(f"[DEBUG] found remote experiments: {len(remote_exps)}")
+    print(f"[INFO] REMOTE={REMOTE}")
+    print(f"[INFO] BASE_REMOTE={BASE_REMOTE}")
+    print(f"[INFO] found remote experiments: {len(remote_exps)}")
     if remote_exps:
-        print(f"[DEBUG] first few: {remote_exps[:5]}")
+        print(f"[INFO] first few: {remote_exps[:5]}")
 
     # (exp, hp) -> [ckpt, ckpt, ...]
     to_copy_by_folder: dict[tuple[str, str], list[str]] = {}

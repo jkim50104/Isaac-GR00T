@@ -39,6 +39,10 @@ CONTROLLER_SLICES = {
     "lift":  slice(18, 19),
 }
 
+# Lift offset: dataset values are ~0.1 lower than actual target
+LIFT_OFFSET = 0.1
+LIFT_MAX = -0.001
+
 CONTROLLER_CONFIG = {
     "arm_l": {
         "joints": [
@@ -153,7 +157,10 @@ def state_to_controller_positions(state_vector):
     positions = {}
     for ctrl_key, s in CONTROLLER_SLICES.items():
         if s.stop <= len(state_vector):
-            positions[ctrl_key] = state_vector[s].tolist()
+            vals = state_vector[s].tolist()
+            if ctrl_key == "lift":
+                vals = [min(v + LIFT_OFFSET, LIFT_MAX) for v in vals]
+            positions[ctrl_key] = vals
     return positions
 
 
@@ -368,8 +375,104 @@ class InitPosePlayer(Node):
 
 
 # =========================================================
-# Visual comparison (standalone only)
+# Visual comparison
 # =========================================================
+
+def extract_reference_frames(dataset_path, episode_idx, video_keys):
+    """
+    Extract first frame from each camera's video for the given episode.
+    video_keys: list of modality keys like ["left_wrist_view", "ego_view", "right_wrist_view"]
+    Returns: {cam_key: rgb_ndarray} (RGB format)
+    """
+    import cv2
+    info = load_dataset_info(dataset_path)
+    video_path_template = info.get("video_path")
+    if not video_path_template:
+        return {}
+    chunks_size = info.get("chunks_size", 1000)
+    ep_chunk = episode_idx // chunks_size
+
+    frames = {}
+    for cam_key in video_keys:
+        dataset_video_key = f"observation.images.{cam_key}"
+        video_rel = video_path_template.format(
+            episode_chunk=ep_chunk, episode_index=episode_idx, video_key=dataset_video_key,
+        )
+        video_path = os.path.join(dataset_path, video_rel)
+        print(f"[ref_frames] {cam_key}: {video_path} exists={os.path.exists(video_path)}")
+        if os.path.exists(video_path):
+            cap = cv2.VideoCapture(video_path)
+            ret, frame = cap.read()
+            cap.release()
+            if ret:
+                frames[cam_key] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    return frames
+
+
+def build_comparison_grid(ref_rgb, live_rgb):
+    """
+    Build a 2x3 comparison grid (RGB format).
+    ref_rgb, live_rgb: single camera images (H,W,3) RGB.
+    Row 1 is handled by caller (live cameras). This builds row 2:
+      [Diff heatmap | Reference | Hover/blend]
+    Returns row2 as a single ndarray, or None.
+    """
+    import cv2
+    from skimage.metrics import structural_similarity as ssim
+
+    if ref_rgb is None or live_rgb is None:
+        return None
+
+    # Resize live to match reference
+    if ref_rgb.shape[:2] != live_rgb.shape[:2]:
+        live_rgb = cv2.resize(live_rgb, (ref_rgb.shape[1], ref_rgb.shape[0]))
+
+    ref_gray = cv2.cvtColor(ref_rgb, cv2.COLOR_RGB2GRAY)
+    live_gray = cv2.cvtColor(live_rgb, cv2.COLOR_RGB2GRAY)
+    score, diff = ssim(ref_gray, live_gray, full=True)
+    diff_uint8 = (255 - (diff * 255)).astype(np.uint8)
+    # Convert heatmap to RGB
+    heatmap = cv2.applyColorMap(diff_uint8, cv2.COLORMAP_JET)
+    heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+
+    # Diff overlay
+    threshold = 50
+    mask = diff_uint8 > threshold
+    diff_overlay = live_rgb.copy()
+    diff_overlay[mask] = cv2.addWeighted(live_rgb, 0.4, heatmap, 0.6, 0)[mask]
+
+    # Blend
+    blend = cv2.addWeighted(ref_rgb, 0.5, live_rgb, 0.5, 0)
+
+    # Add labels
+    h, w = ref_rgb.shape[:2]
+    label_h = 28
+    pad = 4
+    cell_w = w
+    row = np.zeros((label_h + h, cell_w * 3 + pad * 2, 3), dtype=np.uint8)
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    ssim_color = (
+        (0, 255, 0) if score > 0.8
+        else (0, 165, 255) if score > 0.6
+        else (0, 0, 255)
+    )
+
+    # Col 0: Diff
+    cv2.putText(row, f"Diff SSIM={score:.3f}", (4, label_h - 6), font, 0.5, ssim_color, 1)
+    row[label_h:label_h + h, 0:w] = diff_overlay
+
+    # Col 1: Reference
+    x1 = w + pad
+    cv2.putText(row, "Init Pose Ref", (x1 + 4, label_h - 6), font, 0.5, (255, 255, 255), 1)
+    row[label_h:label_h + h, x1:x1 + w] = ref_rgb
+
+    # Col 2: Hover/blend
+    x2 = 2 * (w + pad)
+    cv2.putText(row, "Overlay", (x2 + 4, label_h - 6), font, 0.5, (255, 255, 255), 1)
+    row[label_h:label_h + h, x2:x2 + w] = blend
+
+    return row
+
 
 def extract_reference_frame(dataset_path, info, episode_idx,
                             video_key="observation.images.ego_view"):

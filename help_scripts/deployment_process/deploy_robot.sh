@@ -9,7 +9,9 @@ set -euo pipefail
 source .venv/bin/activate
 
 # ======================== CONFIG ========================
-MODEL_PATH="output/ffw_sg2_rev1_pick_item/G4_B256_REL_AO_WR/checkpoint-20000"
+# MODEL_PATH="output/ffw_sg2_rev1_clean_the_table/G4_B512_REL_AO_WR/checkpoint-5000"
+MODEL_PATH="output/ffw_sg2_rev1_clean_the_table/G4_B256_REL_AO_WR/checkpoint-10000"
+# MODEL_PATH="output/ffw_sg2_rev1_pick_item/G4_B256_REL_AO_WR/checkpoint-30000"
 POLICY_HOST="localhost"
 POLICY_PORT=5555
 LANG_INSTRUCTION=""  # empty = auto-read from dataset

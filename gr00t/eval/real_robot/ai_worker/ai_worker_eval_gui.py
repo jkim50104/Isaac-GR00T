@@ -62,13 +62,15 @@ def _load_init_pose_module():
 class Ros2SpinThread(QThread):
     frame_ready = pyqtSignal(object)
 
-    def __init__(self, collector, sender, video_keys):
+    def __init__(self, collector, sender, video_keys, ref_frames_getter=None):
         super().__init__()
         self._collector = collector
         self._sender = sender
         self._video_keys = video_keys
+        self._ref_frames_getter = ref_frames_getter  # callable returning {cam_key: rgb}
         self._stop = False
         self._paused = False
+        self._init_pose_mod = None
 
     def run(self):
         last_frame_time = 0.0
@@ -83,10 +85,41 @@ class Ros2SpinThread(QThread):
             # Emit frames at ~10 fps for live preview
             now = time.time()
             if now - last_frame_time > 0.1 and self._collector.latest_rgb_by_key:
-                rgb = concat_obs_rgb(self._collector.latest_rgb_by_key)
-                if rgb is not None:
-                    self.frame_ready.emit(rgb)
-                    last_frame_time = now
+                live_by_key = self._collector.latest_rgb_by_key
+                live_row = concat_obs_rgb(live_by_key)
+                if live_row is None:
+                    continue
+
+                # Build 2×3 grid if reference frames available
+                ref_frames = self._ref_frames_getter() if self._ref_frames_getter else {}
+                # Find a common camera key for comparison
+                compare_key = None
+                if ref_frames:
+                    for k in ("ego_view", "left_wrist_view", "right_wrist_view"):
+                        if k in ref_frames and k in live_by_key:
+                            compare_key = k
+                            break
+                if compare_key:
+                    if self._init_pose_mod is None:
+                        self._init_pose_mod = _load_init_pose_module()
+                    bottom_row = self._init_pose_mod.build_comparison_grid(
+                        ref_frames[compare_key], live_by_key[compare_key]
+                    )
+                    if bottom_row is not None:
+                        # Resize bottom row to match live row width
+                        import cv2
+                        lw = live_row.shape[1]
+                        bh, bw = bottom_row.shape[:2]
+                        if bw != lw:
+                            new_h = max(1, int(bh * (lw / bw)))
+                            bottom_row = cv2.resize(bottom_row, (lw, new_h))
+                        grid = np.vstack([live_row, bottom_row])
+                        self.frame_ready.emit(grid)
+                        last_frame_time = now
+                        continue
+
+                self.frame_ready.emit(live_row)
+                last_frame_time = now
 
     def pause(self):
         self._paused = True
@@ -160,14 +193,16 @@ class EpisodeWorker(QThread):
 class InitPoseWorker(QThread):
     status_update = pyqtSignal(str)
     lang_loaded = pyqtSignal(str)
+    ref_frames_ready = pyqtSignal(object)  # dict {cam_key: rgb_ndarray}
     finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, sender, collector, dataset_path):
+    def __init__(self, sender, collector, dataset_path, video_keys=None):
         super().__init__()
         self._sender = sender
         self._collector = collector
         self._dataset_path = dataset_path
+        self._video_keys = video_keys or []
 
     def run(self):
         try:
@@ -177,6 +212,18 @@ class InitPoseWorker(QThread):
             positions, ref_ep, lang = mod.compute_init_pose(self._dataset_path)
             if lang:
                 self.lang_loaded.emit(lang)
+
+            # Extract reference frames for comparison
+            self.status_update.emit(f"Extracting ref frames for {self._video_keys}...")
+            if self._video_keys:
+                ref_frames = mod.extract_reference_frames(
+                    self._dataset_path, ref_ep, self._video_keys
+                )
+                self.status_update.emit(f"Ref frames: {list(ref_frames.keys())}")
+                if ref_frames:
+                    self.ref_frames_ready.emit(ref_frames)
+                else:
+                    self.status_update.emit("WARNING: No reference video frames found in dataset")
 
             max_attempts = 5
             for attempt in range(1, max_attempts + 1):
@@ -237,6 +284,7 @@ class EvalGuiWindow(QMainWindow):
         self._init_pose_worker = None
         self._current_ckpt_config = None
         self._video_keys = []
+        self._ref_frames = {}  # {cam_key: rgb_ndarray} from init pose
 
         self._build_ui()
 
@@ -366,9 +414,11 @@ class EvalGuiWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self._init_pose_worker = InitPoseWorker(
             self._sender, self._collector, dataset_path,
+            video_keys=self._video_keys,
         )
         self._init_pose_worker.status_update.connect(self._on_status_update)
         self._init_pose_worker.lang_loaded.connect(self._on_lang_loaded)
+        self._init_pose_worker.ref_frames_ready.connect(self._on_ref_frames_ready)
         self._init_pose_worker.finished.connect(self._on_manual_init_pose_finished)
         self._init_pose_worker.error_occurred.connect(self._on_error)
         self._init_pose_worker.start()
@@ -376,6 +426,9 @@ class EvalGuiWindow(QMainWindow):
 
     def _on_lang_loaded(self, lang):
         self.lang_input.setText(lang)
+
+    def _on_ref_frames_ready(self, ref_frames):
+        self._ref_frames = ref_frames
 
     def _on_manual_init_pose_finished(self):
         self.init_pose_btn.setEnabled(True)
@@ -387,7 +440,8 @@ class EvalGuiWindow(QMainWindow):
             self._spin_thread.resume()
         elif self._collector is not None:
             self._spin_thread = Ros2SpinThread(
-                self._collector, self._sender, self._video_keys
+                self._collector, self._sender, self._video_keys,
+                ref_frames_getter=lambda: self._ref_frames,
             )
             self._spin_thread.frame_ready.connect(self._update_video_display)
             self._spin_thread.start()
@@ -450,7 +504,8 @@ class EvalGuiWindow(QMainWindow):
 
             # Start spin thread
             self._spin_thread = Ros2SpinThread(
-                self._collector, self._sender, video_keys
+                self._collector, self._sender, video_keys,
+                ref_frames_getter=lambda: self._ref_frames,
             )
             self._spin_thread.frame_ready.connect(self._update_video_display)
             self._spin_thread.start()
