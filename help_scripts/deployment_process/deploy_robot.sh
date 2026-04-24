@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Deploy robot: inference server (auto-start if needed) + eval (GUI or headless)
+# Deploy robot eval (GUI or headless). Requires the inference server to
+# already be running — start it separately with run_inference_server.sh.
 #
 # Usage:
 #   bash help_scripts/deployment_process/deploy_robot.sh              # headless
@@ -7,15 +8,9 @@
 
 set -euo pipefail
 source .venv/bin/activate
+source "$(dirname "$0")/run_inference_server.sh"  # MODEL_PATH, POLICY_HOST, POLICY_PORT
 
-# ======================== CONFIG ========================
-# MODEL_PATH="output/ffw_sg2_rev1_clean_the_table/G4_B512_REL_AO_WR/checkpoint-5000"
-MODEL_PATH="output/ffw_sg2_rev1_clean_the_table/G4_B256_REL_AO_WR/checkpoint-10000"
-# MODEL_PATH="output/ffw_sg2_rev1_pick_item/G4_B256_REL_AO_WR/checkpoint-30000"
-POLICY_HOST="localhost"
-POLICY_PORT=5555
 LANG_INSTRUCTION=""  # empty = auto-read from dataset
-# ========================================================
 
 USE_GUI=false
 for arg in "$@"; do
@@ -24,7 +19,7 @@ for arg in "$@"; do
     esac
 done
 
-# Check if inference server is already running
+# Check that inference server is running
 server_running() {
     python3 -c "
 import socket, sys
@@ -40,47 +35,13 @@ finally:
 " 2>/dev/null
 }
 
-STARTED_SERVER=false
-if server_running; then
-    echo "[OK] Inference server already running at ${POLICY_HOST}:${POLICY_PORT}"
-else
-    echo "[INFO] Inference server not found at ${POLICY_HOST}:${POLICY_PORT}, starting..."
-    python gr00t/eval/run_gr00t_server.py \
-        --embodiment-tag NEW_EMBODIMENT \
-        --model-path "$MODEL_PATH" &
-    SERVER_PID=$!
-    STARTED_SERVER=true
-
-    echo "[INFO] Waiting for server (PID $SERVER_PID) to be ready..."
-    for i in $(seq 1 60); do
-        if server_running; then
-            echo "[OK] Server ready after ${i}s"
-            break
-        fi
-        if ! kill -0 "$SERVER_PID" 2>/dev/null; then
-            echo "[ERROR] Server process died"
-            exit 1
-        fi
-        sleep 1
-    done
-
-    if ! server_running; then
-        echo "[ERROR] Server did not become ready in 60s"
-        kill "$SERVER_PID" 2>/dev/null || true
-        exit 1
-    fi
+if ! server_running; then
+    echo "[ERROR] Inference server not reachable at ${POLICY_HOST}:${POLICY_PORT}"
+    echo "        Start it first with:"
+    echo "          bash help_scripts/deployment_process/run_inference_server.sh"
+    exit 1
 fi
-
-# Cleanup handler
-cleanup() {
-    if [[ "$STARTED_SERVER" == "true" ]]; then
-        echo "[INFO] Shutting down inference server (PID $SERVER_PID)..."
-        kill "$SERVER_PID" 2>/dev/null || true
-        wait "$SERVER_PID" 2>/dev/null || true
-    fi
-    echo "Done."
-}
-trap cleanup EXIT
+echo "[OK] Inference server reachable at ${POLICY_HOST}:${POLICY_PORT}"
 
 # Run eval
 if [[ "$USE_GUI" == "true" ]]; then

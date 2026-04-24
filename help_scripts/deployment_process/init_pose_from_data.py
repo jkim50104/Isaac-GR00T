@@ -39,10 +39,6 @@ CONTROLLER_SLICES = {
     "lift":  slice(18, 19),
 }
 
-# Lift offset: dataset values are ~0.1 lower than actual target
-LIFT_OFFSET = 0.1
-LIFT_MAX = -0.001
-
 CONTROLLER_CONFIG = {
     "arm_l": {
         "joints": [
@@ -157,10 +153,7 @@ def state_to_controller_positions(state_vector):
     positions = {}
     for ctrl_key, s in CONTROLLER_SLICES.items():
         if s.stop <= len(state_vector):
-            vals = state_vector[s].tolist()
-            if ctrl_key == "lift":
-                vals = [min(v + LIFT_OFFSET, LIFT_MAX) for v in vals]
-            positions[ctrl_key] = vals
+            positions[ctrl_key] = state_vector[s].tolist()
     return positions
 
 
