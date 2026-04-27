@@ -85,7 +85,7 @@ CONTROLLER_CONFIG = {
     "lift": {
         "joints": ["lift_joint"],
         "vel": 0.1,
-        "acc": 0.4,
+        "acc": 0.2,
     },
 }
 
@@ -334,7 +334,13 @@ def send_init_pose(sender, current_joint_map, target_positions):
         pub_attr, joints_attr = CTRL_TO_SENDER_ATTRS[ctrl_key]
         publisher = getattr(sender, pub_attr)
         joint_names = getattr(sender, joints_attr)
-        current_pos = [current_joint_map.get(j, 0.0) for j in joint_names]
+        missing = [j for j in joint_names if j not in current_joint_map]
+        if missing:
+            raise RuntimeError(
+                f"Cannot compute init pose trajectory: joint states not yet received for {missing}. "
+                "Ensure /joint_states is publishing before calling send_init_pose."
+            )
+        current_pos = [current_joint_map[j] for j in joint_names]
         cfg = CONTROLLER_CONFIG.get(ctrl_key, {})
         traj = create_smooth_trajectory(
             joint_names, current_pos, target_pos,
@@ -414,6 +420,13 @@ class InitPosePlayer(Node):
 # Visual comparison
 # =========================================================
 
+_MODALITY_TO_DATASET_CAM = {
+    "ego_view": "observation.images.cam_head",
+    "left_wrist_view": "observation.images.cam_wrist_left",
+    "right_wrist_view": "observation.images.cam_wrist_right",
+}
+
+
 def extract_reference_frames(dataset_path, episode_idx, video_keys):
     """
     Extract first frame from each camera's video for the given episode.
@@ -430,7 +443,7 @@ def extract_reference_frames(dataset_path, episode_idx, video_keys):
 
     frames = {}
     for cam_key in video_keys:
-        dataset_video_key = f"observation.images.{cam_key}"
+        dataset_video_key = _MODALITY_TO_DATASET_CAM.get(cam_key, f"observation.images.{cam_key}")
         video_rel = video_path_template.format(
             episode_chunk=ep_chunk, episode_index=episode_idx, video_key=dataset_video_key,
         )
@@ -480,33 +493,26 @@ def build_comparison_grid(ref_rgb, live_rgb):
     # Blend
     blend = cv2.addWeighted(ref_rgb, 0.5, live_rgb, 0.5, 0)
 
-    # Add labels
     h, w = ref_rgb.shape[:2]
-    label_h = 28
     pad = 4
-    cell_w = w
-    row = np.zeros((label_h + h, cell_w * 3 + pad * 2, 3), dtype=np.uint8)
-    font = cv2.FONT_HERSHEY_SIMPLEX
     ssim_color = (
-        (0, 255, 0) if score > 0.8
-        else (0, 165, 255) if score > 0.6
-        else (0, 0, 255)
+        (0, 230, 0) if score > 0.8
+        else (255, 165, 0) if score > 0.6
+        else (255, 80, 80)
     )
 
-    # Col 0: Diff
-    cv2.putText(row, f"Diff SSIM={score:.3f}", (4, label_h - 6), font, 0.5, ssim_color, 1)
-    row[label_h:label_h + h, 0:w] = diff_overlay
+    def _label(img, text, color):
+        img = img.copy()
+        cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1, cv2.LINE_AA)
+        return img
 
-    # Col 1: Reference
-    x1 = w + pad
-    cv2.putText(row, "Init Pose Ref", (x1 + 4, label_h - 6), font, 0.5, (255, 255, 255), 1)
-    row[label_h:label_h + h, x1:x1 + w] = ref_rgb
+    col0 = _label(diff_overlay, f"Diff  SSIM={score:.3f}", ssim_color)
+    col1 = _label(ref_rgb,      "Data First Frame (Init View)", (200, 200, 200))
+    col2 = _label(blend,        "Overlay (Live + Ref)", (200, 200, 200))
 
-    # Col 2: Hover/blend
-    x2 = 2 * (w + pad)
-    cv2.putText(row, "Overlay", (x2 + 4, label_h - 6), font, 0.5, (255, 255, 255), 1)
-    row[label_h:label_h + h, x2:x2 + w] = blend
-
+    row = np.concatenate([col0, np.zeros((h, pad, 3), dtype=np.uint8), col1,
+                          np.zeros((h, pad, 3), dtype=np.uint8), col2], axis=1)
     return row
 
 

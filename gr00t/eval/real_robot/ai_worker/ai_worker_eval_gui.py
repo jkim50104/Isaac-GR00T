@@ -12,7 +12,6 @@ Usage:
 import sys
 import os
 import time
-import random
 import argparse
 import importlib.util
 
@@ -50,6 +49,94 @@ from gr00t.policy.server_client import PolicyClient
 
 
 # ---------------------------------------------------------------------------
+# Camera display helpers
+# ---------------------------------------------------------------------------
+
+_CAM_ORDER = ("left_wrist_view", "ego_view", "right_wrist_view")
+_CAM_DISPLAY_NAMES = {
+    "left_wrist_view": "Left Wrist",
+    "ego_view": "Head",
+    "right_wrist_view": "Right Wrist",
+}
+
+
+def _build_labeled_camera_row(rgb_by_key, model_keys, target_h=240):
+    """Horizontal strip of all 3 cameras with MODEL/VIEW labels. Gray placeholder for missing."""
+    imgs = []
+    for cam_key in _CAM_ORDER:
+        is_model = cam_key in model_keys
+        name = _CAM_DISPLAY_NAMES.get(cam_key, cam_key)
+
+        if cam_key in (rgb_by_key or {}) and rgb_by_key[cam_key] is not None:
+            img = rgb_by_key[cam_key].copy()
+        else:
+            img = np.zeros((target_h, target_h * 4 // 3, 3), dtype=np.uint8)
+            img[:] = (25, 25, 25)
+
+        h, w = img.shape[:2]
+        if h != target_h:
+            img = cv2.resize(img, (max(1, int(w * target_h / h)), target_h))
+
+        border_color = (0, 180, 0) if is_model else (200, 0, 0)  # green / red (RGB)
+        img = cv2.copyMakeBorder(img, 3, 3, 3, 3, cv2.BORDER_CONSTANT, value=border_color)
+
+        tag = "[Model Input]" if is_model else "[Display Only - Not Used by Model]"
+        text = f"{name}  {tag}"
+        cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (0, 230, 0) if is_model else (255, 80, 80), 1, cv2.LINE_AA)
+        imgs.append(img)
+
+    if not imgs:
+        return None
+    target_row_h = max(im.shape[0] for im in imgs)
+    resized = []
+    for im in imgs:
+        h, w = im.shape[:2]
+        if h != target_row_h:
+            im = cv2.resize(im, (max(1, int(w * target_row_h / h)), target_row_h))
+        resized.append(im)
+    return cv2.hconcat(resized)
+
+
+def _build_ref_camera_row(ref_frames, model_keys, target_h=200):
+    """Horizontal strip of reference frames matching _CAM_ORDER layout."""
+    imgs = []
+    for cam_key in _CAM_ORDER:
+        is_model = cam_key in model_keys
+        name = _CAM_DISPLAY_NAMES.get(cam_key, cam_key)
+
+        if cam_key in (ref_frames or {}) and ref_frames[cam_key] is not None:
+            img = ref_frames[cam_key].copy()
+        else:
+            img = np.zeros((target_h, target_h * 4 // 3, 3), dtype=np.uint8)
+            img[:] = (15, 15, 35)
+
+        h, w = img.shape[:2]
+        if h != target_h:
+            img = cv2.resize(img, (max(1, int(w * target_h / h)), target_h))
+
+        border_color = (0, 100, 0) if is_model else (140, 0, 0)  # dark green / dark red (RGB)
+        img = cv2.copyMakeBorder(img, 3, 3, 3, 3, cv2.BORDER_CONSTANT, value=border_color)
+
+        text = f"REF: {name}"
+        cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(img, text, (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (160, 160, 160), 1, cv2.LINE_AA)
+        imgs.append(img)
+
+    if not imgs:
+        return None
+    target_row_h = max(im.shape[0] for im in imgs)
+    resized = []
+    for im in imgs:
+        h, w = im.shape[:2]
+        if h != target_row_h:
+            im = cv2.resize(im, (max(1, int(w * target_row_h / h)), target_row_h))
+        resized.append(im)
+    return cv2.hconcat(resized)
+
+
+# ---------------------------------------------------------------------------
 # Import init_pose_from_data by file path
 # ---------------------------------------------------------------------------
 
@@ -76,7 +163,7 @@ class Ros2SpinThread(QThread):
         super().__init__()
         self._collector = collector
         self._sender = sender
-        self._video_keys = video_keys
+        self._model_video_keys = set(video_keys or [])
         self._ref_frames_getter = ref_frames_getter  # callable returning {cam_key: rgb}
         self._stop = False
         self._paused = False
@@ -92,39 +179,32 @@ class Ros2SpinThread(QThread):
             rclpy.spin_once(self._collector, timeout_sec=0.01)
             rclpy.spin_once(self._sender, timeout_sec=0.0)
 
-            # Emit frames at ~10 fps for live preview
             now = time.time()
             if now - last_frame_time > 0.1 and self._collector.latest_rgb_by_key:
                 live_by_key = self._collector.latest_rgb_by_key
-                live_row = concat_obs_rgb(live_by_key)
+                live_row = _build_labeled_camera_row(live_by_key, self._model_video_keys)
                 if live_row is None:
                     continue
 
-                # Build 2×3 grid if reference frames available
                 ref_frames = self._ref_frames_getter() if self._ref_frames_getter else {}
-                # Find a common camera key for comparison
-                compare_key = None
                 if ref_frames:
-                    for k in ("ego_view", "left_wrist_view", "right_wrist_view"):
-                        if k in ref_frames and k in live_by_key:
-                            compare_key = k
-                            break
-                if compare_key:
                     if self._init_pose_mod is None:
                         self._init_pose_mod = _load_init_pose_module()
-                    bottom_row = self._init_pose_mod.build_comparison_grid(
-                        ref_frames[compare_key], live_by_key[compare_key]
-                    )
-                    if bottom_row is not None:
-                        # Resize bottom row to match live row width
-                        import cv2
-                        lw = live_row.shape[1]
-                        bh, bw = bottom_row.shape[:2]
-                        if bw != lw:
-                            new_h = max(1, int(bh * (lw / bw)))
-                            bottom_row = cv2.resize(bottom_row, (lw, new_h))
-                        grid = np.vstack([live_row, bottom_row])
-                        self.frame_ready.emit(grid)
+                    lw = live_row.shape[1]
+                    rows = [live_row]
+                    for k in _CAM_ORDER:
+                        if k not in ref_frames or k not in live_by_key:
+                            continue
+                        cmp_row = self._init_pose_mod.build_comparison_grid(
+                            ref_frames[k], live_by_key[k]
+                        )
+                        if cmp_row is not None:
+                            ch, cw = cmp_row.shape[:2]
+                            if cw != lw:
+                                cmp_row = cv2.resize(cmp_row, (lw, max(1, int(ch * lw / cw))))
+                            rows.append(cmp_row)
+                    if len(rows) > 1:
+                        self.frame_ready.emit(np.vstack(rows))
                         last_frame_time = now
                         continue
 
@@ -152,7 +232,8 @@ class EpisodeWorker(QThread):
     error_occurred = pyqtSignal(str)
 
     def __init__(
-        self, collector, sender, adapter, horizon, lang, exec_sec=1.0
+        self, collector, sender, adapter, horizon, lang, exec_sec=1.0, use_ros=True,
+        model_video_keys=None,
     ):
         super().__init__()
         self._collector = collector
@@ -161,6 +242,8 @@ class EpisodeWorker(QThread):
         self._horizon = horizon
         self._lang = lang
         self._exec_sec = exec_sec
+        self._use_ros = use_ros
+        self._model_video_keys = set(model_video_keys or [])
         self._stop_event = __import__("threading").Event()
 
     @property
@@ -183,9 +266,13 @@ class EpisodeWorker(QThread):
                 lang_instruction=self._lang,
                 action_horizon=self._horizon,
                 exec_sec=self._exec_sec,
+                use_ros=self._use_ros,
                 should_stop=self._stop_event.is_set,
                 on_obs=lambda obs: self.frame_ready.emit(
-                    concat_obs_rgb(obs.get("rgb", {}))
+                    _build_labeled_camera_row(
+                        getattr(self._collector, "latest_rgb_by_key", None) or obs.get("rgb", {}),
+                        self._model_video_keys,
+                    )
                 ),
                 on_status=lambda msg: self.status_update.emit(msg),
                 get_action_horizon=lambda: self._horizon,
@@ -207,19 +294,22 @@ class InitPoseWorker(QThread):
     finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, sender, collector, dataset_path, video_keys=None):
+    def __init__(self, sender, collector, dataset_path, video_keys=None, episode_idx=None):
         super().__init__()
         self._sender = sender
         self._collector = collector
         self._dataset_path = dataset_path
         self._video_keys = video_keys or []
+        self._episode_idx = episode_idx
 
     def run(self):
         try:
             mod = _load_init_pose_module()
 
             self.status_update.emit("Loading init pose from dataset...")
-            positions, ref_ep, lang = mod.compute_init_pose(self._dataset_path)
+            positions, ref_ep, lang = mod.compute_init_pose(
+                self._dataset_path, episode_idx=self._episode_idx
+            )
             if lang:
                 self.lang_loaded.emit(lang)
 
@@ -234,6 +324,18 @@ class InitPoseWorker(QThread):
                     self.ref_frames_ready.emit(ref_frames)
                 else:
                     self.status_update.emit("WARNING: No reference video frames found in dataset")
+
+            # Must have real joint states before building any trajectory
+            import rclpy
+            self.status_update.emit("Waiting for joint states...")
+            for _ in range(500):  # ~5 s max
+                rclpy.spin_once(self._collector, timeout_sec=0.01)
+                if self._collector.joint_map:
+                    break
+            if not self._collector.joint_map:
+                raise RuntimeError(
+                    "No joint states received after 5 s — aborting init pose to avoid dangerous movement."
+                )
 
             max_attempts = 5
             for attempt in range(1, max_attempts + 1):
@@ -304,6 +406,8 @@ class EvalGuiWindow(QMainWindow):
         self._dummy_ckpt_config = None
 
         self._build_ui()
+        if not self._dummy and self._default_checkpoint:
+            self._auto_init_ros2(self._default_checkpoint)
 
     # ---- UI setup ----
 
@@ -317,6 +421,7 @@ class EvalGuiWindow(QMainWindow):
         row1.addWidget(QLabel("Checkpoint:"))
         self.ckpt_input = QLineEdit(self._default_checkpoint)
         self.ckpt_input.setPlaceholderText("output/.../checkpoint-XXXXX")
+        self.ckpt_input.setReadOnly(True)
         row1.addWidget(self.ckpt_input, stretch=3)
         row1.addWidget(QLabel("Host:"))
         self.host_input = QLineEdit(self._default_host)
@@ -382,6 +487,32 @@ class EvalGuiWindow(QMainWindow):
 
     # ---- Actions ----
 
+    def _auto_init_ros2(self, checkpoint_path):
+        """Create ROS2 nodes and start live preview at launch without waiting for Init Pose."""
+        try:
+            ckpt_config = parse_checkpoint_config(checkpoint_path)
+        except Exception as e:
+            self.status_label.setText(f"Status: Config error at startup: {e}")
+            return
+        state_keys = ckpt_config["state_keys"]
+        video_keys = ckpt_config["video_keys"]
+        action_keys = ckpt_config["action_keys"]
+        self._collector = AiWorkerObsCollector(
+            enabled_state_keys=state_keys,
+            video_keys=video_keys,
+            use_compressed_rgb=True,
+        )
+        self._sender = AiWorkerCommandSender(enabled_action_keys=action_keys)
+        self._video_keys = video_keys
+        self._current_ckpt_config = ckpt_config
+        self._spin_thread = Ros2SpinThread(
+            self._collector, self._sender, self._video_keys,
+            ref_frames_getter=lambda: self._ref_frames,
+        )
+        self._spin_thread.frame_ready.connect(self._update_video_display)
+        self._spin_thread.start()
+        self.status_label.setText("Status: Live preview active — press Init Pose to begin")
+
     def _on_init_pose(self):
         ckpt_path = self.ckpt_input.text().strip()
         if not ckpt_path:
@@ -423,8 +554,42 @@ class EvalGuiWindow(QMainWindow):
                 enabled_action_keys=action_keys,
             )
             self._video_keys = video_keys
+            # Start live preview immediately — paused while InitPoseWorker runs
+            self._spin_thread = Ros2SpinThread(
+                self._collector, self._sender, self._video_keys,
+                ref_frames_getter=lambda: self._ref_frames,
+            )
+            self._spin_thread.frame_ready.connect(self._update_video_display)
+            self._spin_thread.start()
 
         self._current_ckpt_config = ckpt_config
+
+        # Pick instruction + episode in GUI thread (same dialog logic as dummy mode)
+        init_mod = _load_init_pose_module()
+        instructions = init_mod.get_unique_instructions(dataset_path)
+        if not instructions:
+            self.status_label.setText("Status: No task instructions in dataset")
+            return
+
+        if len(instructions) == 1:
+            picked = instructions[0]
+        else:
+            picked, ok = QInputDialog.getItem(
+                self, "Select task instruction",
+                "Choose an instruction for this episode:",
+                instructions, 0, editable=False,
+            )
+            if not ok:
+                return
+
+        matching_eps = init_mod.get_episodes_for_instruction(dataset_path, picked)
+        if not matching_eps:
+            self.status_label.setText(f"Status: No episodes match: {picked}")
+            return
+
+        import random
+        episode_idx = random.choice(matching_eps)
+        self.lang_input.setText(picked)
 
         # Pause spin thread — init pose worker will spin the nodes
         if self._spin_thread:
@@ -436,6 +601,7 @@ class EvalGuiWindow(QMainWindow):
         self._init_pose_worker = InitPoseWorker(
             self._sender, self._collector, dataset_path,
             video_keys=self._video_keys,
+            episode_idx=episode_idx,
         )
         self._init_pose_worker.status_update.connect(self._on_status_update)
         self._init_pose_worker.lang_loaded.connect(self._on_lang_loaded)
@@ -470,6 +636,8 @@ class EvalGuiWindow(QMainWindow):
         if not matching_eps:
             self.status_label.setText(f"Status: No episodes match: {picked}")
             return
+
+        import random
         episode_idx = random.choice(matching_eps)
 
         self._dummy_dataset_path = dataset_path
@@ -509,7 +677,6 @@ class EvalGuiWindow(QMainWindow):
         self.stop_btn.setEnabled(running)
         self.init_pose_btn.setEnabled(not running)
         self.lang_input.setReadOnly(running)
-        self.ckpt_input.setReadOnly(running)
         self.host_input.setReadOnly(running)
         self.port_input.setReadOnly(running)
 
@@ -606,6 +773,7 @@ class EvalGuiWindow(QMainWindow):
             adapter=adapter,
             horizon=self.horizon_slider.value(),
             lang=self.lang_input.text(),
+            model_video_keys=video_keys,
         )
         self._worker.frame_ready.connect(self._update_video_display)
         self._worker.status_update.connect(self._on_status_update)
@@ -673,6 +841,8 @@ class EvalGuiWindow(QMainWindow):
             horizon=self.horizon_slider.value(),
             lang=self.lang_input.text(),
             exec_sec=0.0,
+            use_ros=False,
+            model_video_keys=video_keys,
         )
         self._worker.frame_ready.connect(self._update_video_display)
         self._worker.status_update.connect(self._on_status_update)

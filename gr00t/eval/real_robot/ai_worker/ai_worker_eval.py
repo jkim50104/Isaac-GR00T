@@ -480,15 +480,17 @@ class AiWorkerObsCollector(Node):
             "left_wrist_view": "/camera_left/camera_left/color/image_rect_raw",
             "right_wrist_view": "/camera_right/camera_right/color/image_rect_raw",
         }
-        
-        # Resolve which topics to subscribe to based on modality keys
-        self.camera_key_to_topic: Dict[str, str] = {}
+
+        # Validate model camera keys
         for k in self.video_keys:
             if k not in CAMERA_KEY_TO_TOPIC:
                 raise KeyError(f"Unknown video modality key '{k}'. Add it to CAMERA_KEY_TO_TOPIC.")
-            topic = CAMERA_KEY_TO_TOPIC[k]
-            if self.use_compressed_rgb:
-                topic = topic + "/compressed"
+
+        # Subscribe to ALL known cameras so the GUI can display all feeds regardless of
+        # which subset the model actually uses. build_obs() still returns only video_keys.
+        self.camera_key_to_topic: Dict[str, str] = {}
+        for k, base_topic in CAMERA_KEY_TO_TOPIC.items():
+            topic = base_topic + "/compressed" if self.use_compressed_rgb else base_topic
             self.camera_key_to_topic[k] = topic
 
         # For logging / loops
@@ -1077,9 +1079,9 @@ class DummySender:
         total = self.total_frames or 0
         if total:
             pct = 100.0 * step / total
-            msg = f"[dummy] chunk {step} (obs step ~{step}/{total}, {pct:.0f}%) | running MSE={mse:.4f}"
+            msg = f"[dummy] chunk {step} (obs step ~{step}/{total}, {pct:.0f}%) | running MSE={mse:.8f}"
         else:
-            msg = f"[dummy] chunk {step} | running MSE={mse:.4f}"
+            msg = f"[dummy] chunk {step} | running MSE={mse:.8f}"
         print("\r" + msg + " " * 8, end="", flush=True)
 
     def finalize(
@@ -1169,6 +1171,7 @@ def run_eval_loop(
     on_obs=None,
     on_status=None,
     get_action_horizon=None,
+    use_ros=True,
 ):
     """
     Core eval loop shared by headless and GUI modes.
@@ -1191,7 +1194,9 @@ def run_eval_loop(
 
     # In dummy mode (no ROS2) the spin/ok calls become no-ops.
     def _ok():
-        return rclpy.ok() if rclpy is not None else True
+        if not use_ros or rclpy is None:
+            return True
+        return rclpy.ok()
 
     def _spin(node, timeout_sec):
         if rclpy is not None and isinstance(node, Node):
@@ -1384,7 +1389,9 @@ def eval(cfg: EvalConfig):
                 break
 
         if not collector.joint_map:
-            logging.warning("No joint states received — skipping init pose")
+            raise RuntimeError(
+                "No joint states received after 5 s — aborting init pose to avoid dangerous movement."
+            )
         else:
             positions, ref_ep, _ = _init_mod.compute_init_pose(
                 dataset_path, episode_idx=episode_idx
@@ -1422,6 +1429,7 @@ def eval(cfg: EvalConfig):
             action_horizon=cfg.action_horizon,
             require_cmd_vel=cfg.require_cmd_vel,
             exec_sec=0.0 if cfg.dummy else 1.0,
+            use_ros=not cfg.dummy,
         )
     except KeyboardInterrupt:
         pass
