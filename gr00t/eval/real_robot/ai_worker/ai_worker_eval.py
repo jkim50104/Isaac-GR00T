@@ -50,14 +50,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
-import rclpy
-from rclpy.node import Node
-from builtin_interfaces.msg import Duration  # add this import
 import cv2
-
-from sensor_msgs.msg import Image, JointState, CompressedImage
-from geometry_msgs.msg import Twist
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 import draccus
 from dataclasses import asdict, dataclass
@@ -65,18 +58,43 @@ import logging
 from pprint import pformat
 import os
 import importlib.util
+import random
 import yaml
 
 
 from gr00t.policy.server_client import PolicyClient
 from lerobot.utils.utils import init_logging, log_say
 
+# ROS2 is optional: in --dummy mode the eval runs against dataset frames and
+# doesn't need ROS2 installed. We import what we can and fall back to stubs so
+# the module can still be imported (real-robot classes raise at instantiation).
 try:
+    import rclpy
+    from rclpy.node import Node
+    from builtin_interfaces.msg import Duration
+    from sensor_msgs.msg import Image, JointState, CompressedImage
+    from geometry_msgs.msg import Twist
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
     from cv_bridge import CvBridge
-except ImportError as e:
-    raise ImportError(
-        "cv_bridge is required. Install (Ubuntu/ROS2): sudo apt install ros-${ROS_DISTRO}-cv-bridge"
-    ) from e
+    _ROS2_AVAILABLE = True
+except ImportError:
+    rclpy = None
+    _ROS2_AVAILABLE = False
+
+    class _NoROS2Base:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "ROS2 is not installed on this machine. Use --dummy True to run "
+                "without a robot, or install ROS2 + cv_bridge for real-robot eval."
+            )
+
+    # Stand-ins so class definitions below don't crash at import time.
+    Node = _NoROS2Base
+    Duration = None
+    Image = JointState = CompressedImage = None
+    Twist = None
+    JointTrajectory = JointTrajectoryPoint = None
+    CvBridge = None
 
 
 # -----------------------------------------------------------------------------
@@ -822,6 +840,284 @@ class AiWorkerCommandSender(Node):
             self.pub_base.publish(tw)
 
 
+# -----------------------------------------------------------------------------
+# Dummy collector + sender: drive the eval loop off dataset frames instead of
+# live ROS2 topics. Obs shape matches AiWorkerObsCollector.build_obs() exactly.
+# -----------------------------------------------------------------------------
+
+class _StubLogger:
+    def info(self, msg): logging.info(msg)
+    def warn(self, msg): logging.warning(msg)
+    def warning(self, msg): logging.warning(msg)
+    def error(self, msg): logging.error(msg)
+
+
+# Dataset camera key -> modality key (mirrors meta/modality.json in ai_worker datasets)
+_DATASET_CAM_TO_MODALITY = {
+    "observation.images.cam_head": "ego_view",
+    "observation.images.cam_wrist_left": "left_wrist_view",
+    "observation.images.cam_wrist_right": "right_wrist_view",
+}
+
+# Dataset state/action column layout (per meta/modality.json for ai_worker datasets)
+_DATASET_SLICES = {
+    "left_arm": (0, 7),
+    "left_gripper": (7, 8),
+    "right_arm": (8, 15),
+    "right_gripper": (15, 16),
+    "head": (16, 18),
+    "lift": (18, 19),
+    "base": (19, 22),
+}
+
+
+class DummyCollector:
+    """
+    Drop-in replacement for AiWorkerObsCollector that serves dataset frames.
+
+    Loads one episode's parquet (state/action) + decoded video frames and hands
+    them back through build_obs() in the same dict shape as the ROS2 collector.
+    Advances one step per build_obs() call.
+    """
+
+    def __init__(
+        self,
+        dataset_path: str,
+        episode_idx: int,
+        enabled_state_keys: List[str],
+        video_keys: List[str],
+    ):
+        self.dataset_path = dataset_path
+        self.episode_idx = episode_idx
+        self.enabled_state_keys = list(enabled_state_keys)
+        self.video_keys = list(video_keys)
+        self._logger = _StubLogger()
+
+        # state_vec layout mirrors AiWorkerObsCollector: joints per key, then base
+        self.state_joint_order: List[str] = []
+        for k in self.enabled_state_keys:
+            if k == "base":
+                continue
+            if k not in JOINTS_BY_KEY:
+                raise KeyError(f"Unknown state key '{k}'")
+            self.state_joint_order.extend(JOINTS_BY_KEY[k])
+        self.state_vec_dim = len(self.state_joint_order) + (BASE_DIM if "base" in self.enabled_state_keys else 0)
+
+        # Load dataset frames (parquet state/action + video frames per camera)
+        self._load_episode()
+        self.joint_map: Dict[str, float] = {}  # populated on first build_obs for init-pose flow
+        self.step_idx = 0
+        logging.info(
+            f"[DummyCollector] episode {episode_idx}, {self.num_frames} frames, "
+            f"state_vec_dim={self.state_vec_dim}, cameras={self.video_keys}"
+        )
+
+    def _load_episode(self):
+        import pyarrow.parquet as pq
+        import json
+
+        with open(os.path.join(self.dataset_path, "meta", "info.json")) as f:
+            info = json.load(f)
+
+        chunks_size = info.get("chunks_size", 1000)
+        ep_chunk = self.episode_idx // chunks_size
+        parquet_rel = info["data_path"].format(
+            episode_chunk=ep_chunk, episode_index=self.episode_idx,
+        )
+        table = pq.read_table(
+            os.path.join(self.dataset_path, parquet_rel),
+            columns=["observation.state", "action"],
+        )
+        self.states = np.array([s for s in table.column("observation.state").to_pylist()], dtype=np.float32)
+        self.gt_actions = np.array([a for a in table.column("action").to_pylist()], dtype=np.float32)
+        self.num_frames = len(self.states)
+
+        # Decode video frames for each requested modality key
+        video_template = info.get("video_path")
+        modality_to_dataset_key = {v: k for k, v in _DATASET_CAM_TO_MODALITY.items()}
+        self.video_frames: Dict[str, List[np.ndarray]] = {}
+        for mkey in self.video_keys:
+            ds_key = modality_to_dataset_key.get(mkey)
+            if ds_key is None:
+                raise KeyError(f"No dataset camera mapping for modality '{mkey}'")
+            video_rel = video_template.format(
+                episode_chunk=ep_chunk, episode_index=self.episode_idx, video_key=ds_key,
+            )
+            video_path = os.path.join(self.dataset_path, video_rel)
+            if not os.path.exists(video_path):
+                raise FileNotFoundError(f"Video not found: {video_path}")
+            cap = cv2.VideoCapture(video_path)
+            frames = []
+            while True:
+                ok, bgr = cap.read()
+                if not ok:
+                    break
+                frames.append(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
+            cap.release()
+            self.video_frames[mkey] = frames
+            if len(frames) < self.num_frames:
+                logging.warning(
+                    f"[DummyCollector] {mkey}: {len(frames)} frames but parquet has {self.num_frames}"
+                )
+
+    def get_logger(self):
+        return self._logger
+
+    @property
+    def done(self) -> bool:
+        return self.step_idx >= self.num_frames
+
+    def build_obs(self, lang: str, require_cmd_vel: bool = False) -> Optional[Dict[str, Any]]:
+        if self.done:
+            return None
+
+        state_full = self.states[self.step_idx]  # full dataset state (22 for ai_worker)
+        state_vec = np.zeros(self.state_vec_dim, dtype=np.float32)
+        idx = 0
+        for k in self.enabled_state_keys:
+            s, e = _DATASET_SLICES[k]
+            dim = e - s
+            state_vec[idx: idx + dim] = state_full[s:e]
+            idx += dim
+
+        rgb_dict = {}
+        for mkey in self.video_keys:
+            frames = self.video_frames[mkey]
+            # clamp to last frame if video is shorter than state
+            rgb_dict[mkey] = frames[min(self.step_idx, len(frames) - 1)]
+
+        # Populate joint_map for init_pose_from_data.check_init_pose_reached()
+        for i, jname in enumerate(self.state_joint_order):
+            self.joint_map[jname] = float(state_vec[i])
+
+        now = time.time()
+        obs = {
+            "rgb": rgb_dict,
+            "state_vec": state_vec,
+            "lang": lang,
+            "timestamps": {
+                "rgb_time_by_key": {k: now for k in rgb_dict},
+                "joint_time": now,
+                "cmd_vel_time": now,
+            },
+            # Ground-truth action at this step (for dummy comparison)
+            "_gt_action": self.gt_actions[self.step_idx],
+        }
+        self.step_idx += 1
+        return obs
+
+    def wait_until_fresh_after(self, after_time: float, timeout_sec: float = 1.0) -> bool:
+        return True  # always "fresh" in dummy mode
+
+
+class DummySender:
+    """
+    Drop-in replacement for AiWorkerCommandSender that records predicted actions
+    and ground-truth actions for an open-loop comparison, with a live terminal
+    progress line. Call finalize() at the end to save the comparison plot.
+    """
+
+    def __init__(
+        self,
+        enabled_action_keys: List[str],
+        total_frames: Optional[int] = None,
+    ):
+        self.enabled_action_keys = list(enabled_action_keys)
+        self._logger = _StubLogger()
+        self.total_frames = total_frames
+        self.chunk_count = 0
+        self.latest_obs: Optional[Dict[str, Any]] = None  # set by observer hook
+
+        # Buffers: per chunk, first predicted action (concat across action_keys)
+        # and the ground-truth action at the obs-time step (concat slices of _gt_action).
+        self._pred_buf: List[np.ndarray] = []
+        self._gt_buf: List[np.ndarray] = []
+        self._last_render = 0.0
+
+    def get_logger(self):
+        return self._logger
+
+    def record_obs(self, obs: Dict[str, Any]) -> None:
+        """Called from the eval loop so we know which gt_action to pair with the next chunk."""
+        self.latest_obs = obs
+
+    def send_action_sequence_1s(self, action_seq: List[Dict[str, np.ndarray]], exec_sec: float = 1.0) -> None:
+        if not action_seq or self.latest_obs is None:
+            return
+
+        first = action_seq[0]
+        pred_concat = np.concatenate(
+            [np.atleast_1d(np.asarray(first[k], dtype=np.float32)) for k in self.enabled_action_keys],
+            axis=0,
+        )
+
+        gt_full = np.asarray(self.latest_obs.get("_gt_action"), dtype=np.float32)
+        gt_concat = np.concatenate(
+            [gt_full[_DATASET_SLICES[k][0]: _DATASET_SLICES[k][1]] for k in self.enabled_action_keys],
+            axis=0,
+        )
+
+        self._pred_buf.append(pred_concat)
+        self._gt_buf.append(gt_concat)
+        self.chunk_count += 1
+
+        self._render_progress()
+
+    def _render_progress(self) -> None:
+        now = time.time()
+        if now - self._last_render < 0.2 and self.chunk_count > 1:
+            return
+        self._last_render = now
+
+        preds = np.stack(self._pred_buf)
+        gts = np.stack(self._gt_buf)
+        mse = float(np.mean((preds - gts) ** 2))
+
+        step = self.chunk_count
+        total = self.total_frames or 0
+        if total:
+            pct = 100.0 * step / total
+            msg = f"[dummy] chunk {step} (obs step ~{step}/{total}, {pct:.0f}%) | running MSE={mse:.4f}"
+        else:
+            msg = f"[dummy] chunk {step} | running MSE={mse:.4f}"
+        print("\r" + msg + " " * 8, end="", flush=True)
+
+    def finalize(
+        self,
+        save_path: str,
+        state_keys: List[str],
+        action_keys: List[str],
+        action_horizon: int,
+    ) -> Dict[str, float]:
+        """Stack buffers, save plot, return summary metrics."""
+        print()  # newline after the \r progress line
+        if not self._pred_buf:
+            logging.warning("[dummy] No predictions recorded; skipping plot.")
+            return {"mse": float("nan"), "mae": float("nan"), "n": 0}
+
+        from gr00t.eval.open_loop_eval import plot_trajectory_results
+
+        preds = np.stack(self._pred_buf)
+        gts = np.stack(self._gt_buf)
+        mse = float(np.mean((preds - gts) ** 2))
+        mae = float(np.mean(np.abs(preds - gts)))
+
+        plot_trajectory_results(
+            state_joints_across_time=gts,  # state shape unknown here; plot fn handles mismatch
+            gt_action_across_time=gts,
+            pred_action_across_time=preds,
+            traj_id=0,
+            state_keys=state_keys,
+            action_keys=action_keys,
+            action_horizon=action_horizon,
+            save_plot_path=save_path,
+        )
+
+        logging.info(f"[dummy] saved plot: {save_path}")
+        logging.info(f"[dummy] frames={len(preds)} MSE={mse:.4f} MAE={mae:.4f}")
+        return {"mse": mse, "mae": mae, "n": len(preds)}
+
+
 # =============================================================================
 # Evaluation Config
 # =============================================================================
@@ -842,13 +1138,17 @@ class EvalConfig:
     require_cmd_vel: bool = False
     
     use_compressed_rgb: bool = False  # subscribe to /compressed topics and decode JPEG/PNG
-    
+
     # Checkpoint path — used to derive modality config + dataset path
     checkpoint_path: str = ""
 
     # Fallback: legacy embodiment config file (used only if checkpoint_path is empty)
     embodiment_config_path: str = ""
     embodiment_config_var: str = "ai_worker"
+
+    # Dummy mode: feed dataset frames as obs, log actions instead of sending.
+    # Requires checkpoint_path so the dataset can be resolved from config.yaml.
+    dummy: bool = False
 
 
 
@@ -889,15 +1189,27 @@ def run_eval_loop(
     if should_stop is None:
         should_stop = lambda: False
 
+    # In dummy mode (no ROS2) the spin/ok calls become no-ops.
+    def _ok():
+        return rclpy.ok() if rclpy is not None else True
+
+    def _spin(node, timeout_sec):
+        if rclpy is not None and isinstance(node, Node):
+            rclpy.spin_once(node, timeout_sec=timeout_sec)
+
     time_checker = ObsExecutionTimeChecker(exec_sec, logger=collector.get_logger())
     _last_wait_log = 0.0
 
-    while rclpy.ok() and not should_stop():
-        rclpy.spin_once(collector, timeout_sec=0.01)
-        rclpy.spin_once(sender, timeout_sec=0.0)
+    while _ok() and not should_stop():
+        _spin(collector, timeout_sec=0.01)
+        _spin(sender, timeout_sec=0.0)
 
         obs = collector.build_obs(lang_instruction, require_cmd_vel=require_cmd_vel)
         if obs is None:
+            # Dataset-backed (dummy) collectors signal end-of-episode via done=True.
+            # Live collectors return None transiently while waiting for topics.
+            if getattr(collector, "done", False):
+                break
             now = time.time()
             if on_status:
                 on_status("Waiting for obs...")
@@ -907,6 +1219,10 @@ def run_eval_loop(
             continue
 
         time_checker.check(obs)
+
+        # Hand the obs to the sender (used by DummySender to pair gt with pred).
+        if hasattr(sender, "record_obs"):
+            sender.record_obs(obs)
 
         if on_obs:
             on_obs(obs)
@@ -931,9 +1247,9 @@ def run_eval_loop(
             on_status("Executing actions...")
 
         t_end = time.time() + exec_sec
-        while time.time() < t_end and rclpy.ok() and not should_stop():
-            rclpy.spin_once(collector, timeout_sec=0.01)
-            rclpy.spin_once(sender, timeout_sec=0.0)
+        while time.time() < t_end and _ok() and not should_stop():
+            _spin(collector, timeout_sec=0.01)
+            _spin(sender, timeout_sec=0.0)
 
         if not should_stop():
             ok = collector.wait_until_fresh_after(after_time=t_end, timeout_sec=0.01)
@@ -987,25 +1303,64 @@ def eval(cfg: EvalConfig):
         _init_mod = importlib.util.module_from_spec(_init_spec)
         _init_spec.loader.exec_module(_init_mod)
 
-    # If no lang instruction given, read from dataset
+    # Choose language instruction interactively from dataset
     lang_instruction = cfg.lang_instruction
+    episode_idx = None
     if not lang_instruction and _init_mod and dataset_path:
-        lang_instruction = _init_mod.get_lang_instruction(dataset_path) or ""
-        if lang_instruction:
-            logging.info(f"Using language instruction from dataset: \"{lang_instruction}\"")
+        instructions = _init_mod.get_unique_instructions(dataset_path)
+        if len(instructions) == 1:
+            lang_instruction = instructions[0]
+            logging.info(f"Single instruction in dataset: \"{lang_instruction}\"")
+        elif len(instructions) > 1:
+            print("\nAvailable task instructions:")
+            for i, instr in enumerate(instructions):
+                ep_count = len(_init_mod.get_episodes_for_instruction(dataset_path, instr))
+                print(f"  [{i}] {instr}  ({ep_count} episodes)")
+            choice = input(f"\nSelect instruction [0-{len(instructions)-1}]: ").strip()
+            try:
+                lang_instruction = instructions[int(choice)]
+            except (ValueError, IndexError):
+                lang_instruction = instructions[0]
+                logging.warning(f"Invalid choice, defaulting to: \"{lang_instruction}\"")
+        else:
+            logging.warning("No task instructions found in dataset")
+
+    if lang_instruction and _init_mod and dataset_path:
+        matching_eps = _init_mod.get_episodes_for_instruction(dataset_path, lang_instruction)
+        if matching_eps:
+            episode_idx = random.choice(matching_eps)
+            logging.info(f"Selected random episode {episode_idx} from {len(matching_eps)} episodes for \"{lang_instruction}\"")
+
     if not lang_instruction:
         lang_instruction = "pick the blue bowl"
         logging.warning(f"No language instruction provided, using default: \"{lang_instruction}\"")
 
-    rclpy.init()
-    collector = AiWorkerObsCollector(
-        enabled_state_keys=state_keys,
-        video_keys=video_keys,
-        use_compressed_rgb=cfg.use_compressed_rgb,
-    )
-    sender = AiWorkerCommandSender(enabled_action_keys=action_keys)
-
-    log_say("Initializing ROS2 collector/sender", cfg.play_sounds, blocking=True)
+    if cfg.dummy:
+        if not dataset_path:
+            raise ValueError("--dummy requires a checkpoint with a resolvable dataset_path")
+        if episode_idx is None:
+            # fallback: episode 0 if no instruction filter narrowed it
+            episode_idx = 0
+        collector = DummyCollector(
+            dataset_path=dataset_path,
+            episode_idx=episode_idx,
+            enabled_state_keys=state_keys,
+            video_keys=video_keys,
+        )
+        sender = DummySender(
+            enabled_action_keys=action_keys,
+            total_frames=collector.num_frames,
+        )
+        logging.info("[DUMMY MODE] ROS2 skipped; feeding dataset frames to policy")
+    else:
+        rclpy.init()
+        collector = AiWorkerObsCollector(
+            enabled_state_keys=state_keys,
+            video_keys=video_keys,
+            use_compressed_rgb=cfg.use_compressed_rgb,
+        )
+        sender = AiWorkerCommandSender(enabled_action_keys=action_keys)
+        log_say("Initializing ROS2 collector/sender", cfg.play_sounds, blocking=True)
 
     adapter = AiWorkerAdapter(
         policy_client=PolicyClient(host=cfg.policy_host, port=cfg.policy_port),
@@ -1018,8 +1373,8 @@ def eval(cfg: EvalConfig):
 
     log_say(f'Policy ready: "{lang_instruction}"', cfg.play_sounds, blocking=True)
 
-    # Init pose reset (once at startup)
-    if _init_mod and dataset_path:
+    # Init pose reset (only on real robot; dummy mode starts from dataset's first frame)
+    if not cfg.dummy and _init_mod and dataset_path:
         logging.info(f"Running init pose from dataset: {dataset_path}")
 
         # Spin until we have joint states
@@ -1031,10 +1386,9 @@ def eval(cfg: EvalConfig):
         if not collector.joint_map:
             logging.warning("No joint states received — skipping init pose")
         else:
-            positions, ref_ep, ep_lang = _init_mod.compute_init_pose(dataset_path)
-            if ep_lang and not lang_instruction:
-                lang_instruction = ep_lang
-                logging.info(f"Using language from episode {ref_ep}: \"{lang_instruction}\"")
+            positions, ref_ep, _ = _init_mod.compute_init_pose(
+                dataset_path, episode_idx=episode_idx
+            )
 
             max_attempts = 5
             for attempt in range(1, max_attempts + 1):
@@ -1056,7 +1410,8 @@ def eval(cfg: EvalConfig):
             else:
                 logging.warning(f"Init pose not reached after {max_attempts} attempts (err={max_err:.4f} @ {worst})")
 
-    input("\nPress Enter to start eval loop...")
+    if not cfg.dummy:
+        input("\nPress Enter to start eval loop...")
 
     try:
         run_eval_loop(
@@ -1066,13 +1421,25 @@ def eval(cfg: EvalConfig):
             lang_instruction=lang_instruction,
             action_horizon=cfg.action_horizon,
             require_cmd_vel=cfg.require_cmd_vel,
+            exec_sec=0.0 if cfg.dummy else 1.0,
         )
     except KeyboardInterrupt:
         pass
     finally:
-        collector.destroy_node()
-        sender.destroy_node()
-        rclpy.shutdown()
+        if cfg.dummy:
+            save_dir = os.path.join(cfg.checkpoint_path, "dummy_eval")
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"ep_{episode_idx}.jpeg")
+            sender.finalize(
+                save_path=save_path,
+                state_keys=state_keys,
+                action_keys=action_keys,
+                action_horizon=cfg.action_horizon,
+            )
+        else:
+            collector.destroy_node()
+            sender.destroy_node()
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

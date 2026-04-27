@@ -5,17 +5,18 @@
 # Usage:
 #   bash help_scripts/deployment_process/deploy_robot.sh              # headless
 #   bash help_scripts/deployment_process/deploy_robot.sh --gui        # GUI mode
+#   bash help_scripts/deployment_process/deploy_robot.sh --dummy      # open-loop eval on dataset (no robot)
 
 set -euo pipefail
 source .venv/bin/activate
 source "$(dirname "$0")/run_inference_server.sh"  # MODEL_PATH, POLICY_HOST, POLICY_PORT
 
-LANG_INSTRUCTION=""  # empty = auto-read from dataset
-
 USE_GUI=false
+USE_DUMMY=false
 for arg in "$@"; do
     case "$arg" in
         --gui) USE_GUI=true ;;
+        --dummy) USE_DUMMY=true ;;
     esac
 done
 
@@ -45,14 +46,25 @@ echo "[OK] Inference server reachable at ${POLICY_HOST}:${POLICY_PORT}"
 
 # Run eval
 if [[ "$USE_GUI" == "true" ]]; then
-    echo "[INFO] Launching GUI..."
-    python gr00t/eval/real_robot/ai_worker/ai_worker_eval_gui.py \
-        --checkpoint "$MODEL_PATH" --host "$POLICY_HOST" --port "$POLICY_PORT"
+    GUI_ARGS=(--checkpoint "$MODEL_PATH" --host "$POLICY_HOST" --port "$POLICY_PORT")
+    if [[ "$USE_DUMMY" == "true" ]]; then
+        echo "[INFO] Launching GUI in DUMMY mode (no robot)..."
+        GUI_ARGS+=(--dummy)
+    else
+        echo "[INFO] Launching GUI..."
+    fi
+    python gr00t/eval/real_robot/ai_worker/ai_worker_eval_gui.py "${GUI_ARGS[@]}"
 else
-    echo "[INFO] Launching headless eval..."
+    EXTRA_ARGS=()
+    if [[ "$USE_DUMMY" == "true" ]]; then
+        echo "[INFO] Launching headless eval in DUMMY mode (no robot)..."
+        EXTRA_ARGS+=(--dummy True)
+    else
+        echo "[INFO] Launching headless eval..."
+    fi
     python gr00t/eval/real_robot/ai_worker/ai_worker_eval.py \
         --checkpoint_path "$MODEL_PATH" \
-        --lang_instruction "$LANG_INSTRUCTION" \
         --action_horizon 32 \
-        --use_compressed_rgb True
+        --use_compressed_rgb True \
+        "${EXTRA_ARGS[@]}"
 fi

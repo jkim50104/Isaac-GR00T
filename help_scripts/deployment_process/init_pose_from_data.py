@@ -21,11 +21,30 @@ import argparse
 import numpy as np
 import pyarrow.parquet as pq
 
-import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
-from sensor_msgs.msg import JointState, CompressedImage
+# ROS2 is optional: pure-data helpers (get_unique_instructions, compute_init_pose,
+# etc.) work without it. The ROS2-backed functions (send_init_pose, InitPosePlayer)
+# raise if called on a machine without ROS2.
+try:
+    import rclpy
+    from rclpy.node import Node
+    from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+    from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+    from sensor_msgs.msg import JointState, CompressedImage
+    _ROS2_AVAILABLE = True
+except ImportError:
+    rclpy = None
+    _ROS2_AVAILABLE = False
+
+    class _NoROS2Base:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "ROS2 not installed; cannot use InitPosePlayer / send_init_pose."
+            )
+
+    Node = _NoROS2Base
+    QoSProfile = ReliabilityPolicy = DurabilityPolicy = HistoryPolicy = None
+    JointTrajectory = JointTrajectoryPoint = None
+    JointState = CompressedImage = None
 
 
 # =========================================================
@@ -169,6 +188,30 @@ def get_lang_instruction(dataset_path):
     if tasks:
         return tasks[0]
     return None
+
+
+def get_unique_instructions(dataset_path):
+    """
+    Return sorted list of unique task instructions from the dataset.
+    """
+    episodes = read_episodes_meta(dataset_path)
+    instructions = set()
+    for ep in episodes:
+        for t in ep.get("tasks", []):
+            instructions.add(t)
+    return sorted(instructions)
+
+
+def get_episodes_for_instruction(dataset_path, instruction):
+    """
+    Return list of episode indices whose tasks include the given instruction.
+    """
+    episodes = read_episodes_meta(dataset_path)
+    return [
+        ep["episode_index"]
+        for ep in episodes
+        if instruction in ep.get("tasks", [])
+    ]
 
 
 def compute_init_pose(dataset_path, mode="random", episode_idx=None):

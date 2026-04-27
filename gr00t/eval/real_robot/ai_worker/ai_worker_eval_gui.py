@@ -12,6 +12,7 @@ Usage:
 import sys
 import os
 import time
+import random
 import argparse
 import importlib.util
 
@@ -21,16 +22,25 @@ import cv2
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QSpinBox, QSlider, QSizePolicy,
+    QInputDialog,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 
-import rclpy
+# ROS2 is optional when running --dummy.
+try:
+    import rclpy
+    _ROS2_AVAILABLE = True
+except ImportError:
+    rclpy = None
+    _ROS2_AVAILABLE = False
 
 from gr00t.eval.real_robot.ai_worker.ai_worker_eval import (
     AiWorkerObsCollector,
     AiWorkerCommandSender,
     AiWorkerAdapter,
+    DummyCollector,
+    DummySender,
     DIMS_BY_KEY,
     concat_obs_rgb,
     run_eval_loop,
@@ -268,14 +278,16 @@ class InitPoseWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class EvalGuiWindow(QMainWindow):
-    def __init__(self, checkpoint="", host="localhost", port=5555):
+    def __init__(self, checkpoint="", host="localhost", port=5555, dummy=False):
         super().__init__()
-        self.setWindowTitle("GR00T Robot Eval")
+        title = "GR00T Robot Eval" + (" [DUMMY]" if dummy else "")
+        self.setWindowTitle(title)
         self.setMinimumSize(900, 700)
 
         self._default_checkpoint = checkpoint
         self._default_host = host
         self._default_port = port
+        self._dummy = dummy
 
         self._collector = None
         self._sender = None
@@ -285,6 +297,11 @@ class EvalGuiWindow(QMainWindow):
         self._current_ckpt_config = None
         self._video_keys = []
         self._ref_frames = {}  # {cam_key: rgb_ndarray} from init pose
+
+        # Dummy-mode episode context (picked via Init Pose button)
+        self._dummy_dataset_path = ""
+        self._dummy_episode_idx = None
+        self._dummy_ckpt_config = None
 
         self._build_ui()
 
@@ -385,6 +402,10 @@ class EvalGuiWindow(QMainWindow):
             self.status_label.setText(f"Status: Dataset not found: {dataset_path}")
             return
 
+        if self._dummy:
+            self._dummy_init_pose(dataset_path, ckpt_config)
+            return
+
         # Ensure ROS2 nodes exist
         state_keys = ckpt_config["state_keys"]
         video_keys = ckpt_config["video_keys"]
@@ -424,6 +445,43 @@ class EvalGuiWindow(QMainWindow):
         self._init_pose_worker.start()
         self.status_label.setText("Status: Resetting to init pose...")
 
+    # ---- Dummy-mode helpers ----
+
+    def _dummy_init_pose(self, dataset_path, ckpt_config):
+        """Show instruction picker, choose random matching episode, populate lang."""
+        init_mod = _load_init_pose_module()
+        instructions = init_mod.get_unique_instructions(dataset_path)
+        if not instructions:
+            self.status_label.setText("Status: No task instructions in dataset")
+            return
+
+        if len(instructions) == 1:
+            picked = instructions[0]
+        else:
+            picked, ok = QInputDialog.getItem(
+                self, "Select task instruction",
+                "Choose an instruction for this episode:",
+                instructions, 0, editable=False,
+            )
+            if not ok:
+                return
+
+        matching_eps = init_mod.get_episodes_for_instruction(dataset_path, picked)
+        if not matching_eps:
+            self.status_label.setText(f"Status: No episodes match: {picked}")
+            return
+        episode_idx = random.choice(matching_eps)
+
+        self._dummy_dataset_path = dataset_path
+        self._dummy_episode_idx = episode_idx
+        self._dummy_ckpt_config = ckpt_config
+        self._video_keys = ckpt_config["video_keys"]
+        self._current_ckpt_config = ckpt_config
+        self.lang_input.setText(picked)
+        self.status_label.setText(
+            f"Status: [DUMMY] ep {episode_idx} / {picked!r} — press Start Episode"
+        )
+
     def _on_lang_loaded(self, lang):
         self.lang_input.setText(lang)
 
@@ -456,6 +514,10 @@ class EvalGuiWindow(QMainWindow):
         self.port_input.setReadOnly(running)
 
     def _on_start_episode(self):
+        if self._dummy:
+            self._start_dummy_episode()
+            return
+
         ckpt_path = self.ckpt_input.text().strip()
         if not ckpt_path:
             self.status_label.setText("Status: No checkpoint path set")
@@ -557,6 +619,74 @@ class EvalGuiWindow(QMainWindow):
         self._set_running_state(True)
         self.status_label.setText("Status: Episode running")
 
+    def _start_dummy_episode(self):
+        """Dummy-mode Start Episode: requires Init Pose to have picked an episode first."""
+        if self._dummy_episode_idx is None or not self._dummy_dataset_path:
+            self.status_label.setText("Status: Press Init Pose first to pick an instruction")
+            return
+
+        ckpt_config = self._dummy_ckpt_config
+        video_keys = ckpt_config["video_keys"]
+        state_keys = ckpt_config["state_keys"]
+        action_keys = ckpt_config["action_keys"]
+        language_key = ckpt_config["language_key"]
+
+        max_horizon = ckpt_config.get("action_horizon", 32)
+        self.horizon_slider.setRange(1, max_horizon)
+        if self.horizon_slider.value() > max_horizon:
+            self.horizon_slider.setValue(max_horizon)
+
+        # Build fresh dummy nodes each episode (so the collector restarts from step 0).
+        self._collector = DummyCollector(
+            dataset_path=self._dummy_dataset_path,
+            episode_idx=self._dummy_episode_idx,
+            enabled_state_keys=state_keys,
+            video_keys=video_keys,
+        )
+        self._sender = DummySender(
+            enabled_action_keys=action_keys,
+            total_frames=self._collector.num_frames,
+        )
+        self._video_keys = video_keys
+
+        host = self.host_input.text()
+        port = self.port_input.value()
+        try:
+            policy_client = PolicyClient(host=host, port=port)
+        except Exception as e:
+            self.status_label.setText(f"Status: Policy error: {e}")
+            return
+
+        adapter = AiWorkerAdapter(
+            policy_client=policy_client,
+            state_keys=state_keys,
+            action_keys=action_keys,
+            video_keys=video_keys,
+            language_key=language_key,
+            dims_by_key=DIMS_BY_KEY,
+        )
+
+        self._worker = EpisodeWorker(
+            collector=self._collector,
+            sender=self._sender,
+            adapter=adapter,
+            horizon=self.horizon_slider.value(),
+            lang=self.lang_input.text(),
+            exec_sec=0.0,
+        )
+        self._worker.frame_ready.connect(self._update_video_display)
+        self._worker.status_update.connect(self._on_status_update)
+        self._worker.episode_finished.connect(self._on_episode_finished)
+        self._worker.error_occurred.connect(self._on_error)
+
+        self.horizon_slider.valueChanged.connect(self._on_horizon_changed)
+
+        self._worker.start()
+        self._set_running_state(True)
+        self.status_label.setText(
+            f"Status: [DUMMY] ep {self._dummy_episode_idx} running ({self._collector.num_frames} frames)"
+        )
+
     def _on_stop_episode(self):
         if self._worker:
             self.status_label.setText("Status: Stopping...")
@@ -565,11 +695,39 @@ class EvalGuiWindow(QMainWindow):
     def _on_episode_finished(self):
         self._set_running_state(False)
 
+        if self._dummy:
+            self._finalize_dummy_episode()
+            self.status_label.setText(
+                "Status: [DUMMY] episode done — press Init Pose to start another"
+            )
+            return
+
         # Resume spin thread for live preview
         if self._spin_thread:
             self._spin_thread.resume()
 
         self.status_label.setText("Status: Idle (press Init Pose to reset)")
+
+    def _finalize_dummy_episode(self):
+        """Save plot for current dummy episode (possibly partial). Idempotent."""
+        if not isinstance(self._sender, DummySender):
+            return
+        ckpt_path = self.ckpt_input.text().strip()
+        if not ckpt_path or self._dummy_episode_idx is None:
+            return
+        try:
+            ckpt_config = self._dummy_ckpt_config or {}
+            save_dir = os.path.join(ckpt_path, "dummy_eval")
+            os.makedirs(save_dir, exist_ok=True)
+            save_path = os.path.join(save_dir, f"ep_{self._dummy_episode_idx}.jpeg")
+            self._sender.finalize(
+                save_path=save_path,
+                state_keys=ckpt_config.get("state_keys", []),
+                action_keys=ckpt_config.get("action_keys", []),
+                action_horizon=self.horizon_slider.value(),
+            )
+        except Exception as e:
+            print(f"[dummy] finalize failed: {e}")
 
     def _on_horizon_changed(self, value):
         if self._worker:
@@ -581,6 +739,9 @@ class EvalGuiWindow(QMainWindow):
     def _on_error(self, msg):
         self.status_label.setText(f"Status: ERROR - {msg}")
         self._set_running_state(False)
+        if self._dummy:
+            self._finalize_dummy_episode()
+            return
         if self._spin_thread:
             self._spin_thread.resume()
 
@@ -608,12 +769,12 @@ class EvalGuiWindow(QMainWindow):
             self._spin_thread.stop()
             self._spin_thread.wait(5000)
             self._spin_thread = None
-        if self._collector:
+        if self._collector is not None and hasattr(self._collector, "destroy_node"):
             self._collector.destroy_node()
-            self._collector = None
-        if self._sender:
+        self._collector = None
+        if self._sender is not None and hasattr(self._sender, "destroy_node"):
             self._sender.destroy_node()
-            self._sender = None
+        self._sender = None
 
     def shutdown(self):
         if self._worker:
@@ -621,6 +782,9 @@ class EvalGuiWindow(QMainWindow):
             self._worker.wait(5000)
         if self._init_pose_worker:
             self._init_pose_worker.wait(5000)
+        # Save partial plot if a dummy episode was in progress.
+        if self._dummy:
+            self._finalize_dummy_episode()
         self._teardown_ros2()
 
     def closeEvent(self, event):
@@ -637,17 +801,23 @@ def main():
     parser.add_argument("--checkpoint", default="", help="Default checkpoint path")
     parser.add_argument("--host", default="localhost", help="Default policy server host")
     parser.add_argument("--port", type=int, default=5555, help="Default policy server port")
+    parser.add_argument("--dummy", action="store_true",
+                        help="Feed dataset frames instead of live ROS2 topics (no robot required)")
     args = parser.parse_args()
 
-    rclpy.init()
+    if not args.dummy:
+        if not _ROS2_AVAILABLE:
+            raise RuntimeError("ROS2 not installed. Pass --dummy to run without a robot.")
+        rclpy.init()
     app = QApplication(sys.argv)
     window = EvalGuiWindow(
-        checkpoint=args.checkpoint, host=args.host, port=args.port,
+        checkpoint=args.checkpoint, host=args.host, port=args.port, dummy=args.dummy,
     )
     window.show()
     exit_code = app.exec_()
     window.shutdown()
-    rclpy.shutdown()
+    if not args.dummy and _ROS2_AVAILABLE:
+        rclpy.shutdown()
     sys.exit(exit_code)
 
 
