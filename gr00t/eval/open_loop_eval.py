@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from copy import deepcopy
 from dataclasses import dataclass, field
 import logging
@@ -92,7 +107,12 @@ def plot_trajectory_results(
         # put a dot every ACTION_HORIZON
         for j in range(0, actual_steps, action_horizon):
             if j == 0:
-                ax.plot(j, gt_action_across_time[j, action_idx], "ro", label="inference point")
+                ax.plot(
+                    j,
+                    gt_action_across_time[j, action_idx],
+                    "ro",
+                    label="inference point",
+                )
             else:
                 ax.plot(j, gt_action_across_time[j, action_idx], "ro")
 
@@ -249,8 +269,8 @@ class ArgsConfig:
     dataset_path: str = "demo_data/cube_to_bowl_5/"
     """Path to the dataset."""
 
-    embodiment_tag: EmbodimentTag = EmbodimentTag.NEW_EMBODIMENT
-    """Embodiment tag to use."""
+    embodiment_tag: str = "new_embodiment"
+    """Embodiment tag (name or value, case-insensitive). Run with --help to see known tags."""
 
     model_path: str | None = None
     """Path to the model checkpoint."""
@@ -268,6 +288,7 @@ class ArgsConfig:
     """Path to save the log file."""
 
 def main(args: ArgsConfig):
+    args.embodiment_tag = EmbodimentTag.resolve(args.embodiment_tag)
     # Set up logging
     log_dir = Path(args.log_path) / "open_loop_eval"
     log_dir.mkdir(parents=True, exist_ok=True)

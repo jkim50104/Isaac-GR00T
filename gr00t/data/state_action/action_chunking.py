@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Generic, List, Optional, Sequence, TypeVar, Union
 
 from gr00t.data.state_action.pose import EndEffectorPose, JointPose, Pose
@@ -145,7 +160,9 @@ class ActionChunk(Generic[PoseType]):
         raise NotImplementedError("Subclasses must implement to_absolute_chunking")
 
     def interpolate(
-        self, num_points: Optional[int] = None, times: Optional[NDArray[np.float64]] = None
+        self,
+        num_points: Optional[int] = None,
+        times: Optional[NDArray[np.float64]] = None,
     ) -> "ActionChunk":
         """
         Interpolate the action chunking to generate intermediate poses.
@@ -248,7 +265,9 @@ class JointActionChunk(ActionChunk[JointPose]):
         super().__init__(poses, times)
 
     def interpolate(
-        self, num_points: Optional[int] = None, times: Optional[NDArray[np.float64]] = None
+        self,
+        num_points: Optional[int] = None,
+        times: Optional[NDArray[np.float64]] = None,
     ) -> "JointActionChunk":
         """
         Interpolate the joint action chunking to generate intermediate configurations.
@@ -455,8 +474,27 @@ class EndEffectorActionChunk(ActionChunk[EndEffectorPose]):
 
         super().__init__(poses, times)
 
+    @classmethod
+    def from_array(cls, data: np.ndarray, action_format: ActionFormat) -> "EndEffectorActionChunk":
+        """
+        Create an EndEffectorActionChunk from a 2-D array using the specified action format.
+
+        This is the inverse of ``.to(action_format)``.
+
+        Args:
+            data: Array of shape (N, D) where D depends on the action_format.
+            action_format: The format that describes the layout of each row.
+
+        Returns:
+            EndEffectorActionChunk with N poses.
+        """
+        poses = [EndEffectorPose.from_action_format(row, action_format) for row in data]
+        return cls(poses)
+
     def interpolate(
-        self, num_points: Optional[int] = None, times: Optional[NDArray[np.float64]] = None
+        self,
+        num_points: Optional[int] = None,
+        times: Optional[NDArray[np.float64]] = None,
     ) -> "EndEffectorActionChunk":
         """
         Interpolate the action chunking to generate intermediate poses.

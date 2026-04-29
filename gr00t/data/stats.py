@@ -1,14 +1,31 @@
 #!/usr/bin/env python
+
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Calculate dataset statistics for LeRobot datasets.
-Note: Please update the `gr00t/configs/data/embodiment_configs.py` file with the correct modality configurations for the dataset you are using before running this script.
 
 Usage:
-    python gr00t/data/stats.py <dataset_path> <embodiment_tag>
+    python gr00t/data/stats.py --dataset-path <dataset_path> --embodiment-tag <embodiment_tag>
+    python gr00t/data/stats.py --dataset-path <dataset_path> --embodiment-tag <embodiment_tag> --modality-config-path <config.py>
 
 Args:
     dataset_path: Path to the dataset.
-    embodiment_tag: Embodiment tag to use to load modality configurations from `gr00t/configs/data/embodiment_configs.py`.
+    embodiment_tag: Embodiment tag to use to load modality configurations.
+    modality_config_path: Optional path to a .py config file for custom embodiment tags not in the built-in registry.
 """
 
 import json
@@ -180,26 +197,12 @@ class RelativeActionLoader:
             last_state = state_data[state_ind]
             actions = action_data[action_inds]
             if self.action_config.type == ActionType.EEF:
-                # raise NotImplementedError("EEF action is not yet supported")
-                assert len(last_state) == 9  # xyz + rot6d
-                assert actions.shape[1] == 9  # xyz + rot6d
-
-                reference_frame = EndEffectorPose(
-                    translation=last_state[:3],
-                    rotation=last_state[3:],
-                    rotation_type="rot6d",
+                action_format = self.action_config.format
+                reference_frame = EndEffectorPose.from_action_format(last_state, action_format)
+                traj = EndEffectorActionChunk.from_array(actions, action_format).relative_chunking(
+                    reference_frame=reference_frame
                 )
-
-                traj = EndEffectorActionChunk(
-                    [
-                        EndEffectorPose(translation=m[:3], rotation=m[3:], rotation_type="rot6d")
-                        for m in actions
-                    ]
-                ).relative_chunking(reference_frame=reference_frame)
-
-                raise NotImplementedError(
-                    "EEF action is not yet supported, need to handle rotation transformation based on action format"
-                )
+                trajectories.append(traj.to(action_format).astype(np.float32))
             elif self.action_config.type == ActionType.NON_EEF:
                 reference_frame = JointPose(last_state)
                 traj = JointActionChunk([JointPose(m) for m in actions]).relative_chunking(
@@ -261,7 +264,32 @@ def generate_rel_stats(dataset_path: Path | str, embodiment_tag: EmbodimentTag) 
         json.dump(to_json_serializable(dict(stats)), f, indent=4)
 
 
-def main(dataset_path: Path | str, embodiment_tag: EmbodimentTag):
+def main(
+    dataset_path: Path | str,
+    embodiment_tag: EmbodimentTag,
+    modality_config_path: str | None = None,
+):
+    """Generate dataset statistics.
+
+    Args:
+        dataset_path: Path to the dataset.
+        embodiment_tag: Embodiment tag for modality configurations.
+        modality_config_path: Optional path to a .py modality config file. Required for custom
+            embodiment tags not in the built-in MODALITY_CONFIGS registry.
+    """
+    if modality_config_path is not None:
+        import importlib
+        import sys
+
+        config_path = Path(modality_config_path)
+        if config_path.exists() and config_path.suffix == ".py":
+            sys.path.append(str(config_path.parent))
+            importlib.import_module(config_path.stem)
+            print(f"Loaded modality config: {config_path}")
+        else:
+            raise FileNotFoundError(
+                f"Modality config path does not exist or is not a .py file: {modality_config_path}"
+            )
     generate_stats(dataset_path)
     print(f"Generated stats for {dataset_path}")
     generate_rel_stats(dataset_path, embodiment_tag)

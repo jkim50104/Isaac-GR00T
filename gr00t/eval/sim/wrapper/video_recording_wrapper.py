@@ -1,3 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import os
 from pathlib import Path
 import uuid
@@ -110,15 +125,14 @@ class VideoRecorder:
         if not self.is_ready():
             return
 
-        # Flush stream
-        for packet in self.stream.encode():
-            self.container.mux(packet)
-
-        # Close the file
-        self.container.close()
-
-        # reset runtime parameters
-        self._reset_state()
+        try:
+            # Flush stream
+            for packet in self.stream.encode():
+                self.container.mux(packet)
+        finally:
+            # Always close the file and reset state, even if flushing fails
+            self.container.close()
+            self._reset_state()
 
 
 class VideoRecordingWrapper(gym.Wrapper):
@@ -411,7 +425,13 @@ class VideoRecordingWrapper(gym.Wrapper):
 
                 # Add text
                 cv2.putText(
-                    frame, language, (text_x, text_y), font, font_scale, font_color, font_thickness
+                    frame,
+                    language,
+                    (text_x, text_y),
+                    font,
+                    font_scale,
+                    font_color,
+                    font_thickness,
                 )
 
             self.video_recorder.write_frame(frame)
