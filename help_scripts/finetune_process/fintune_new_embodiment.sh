@@ -44,42 +44,41 @@ export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
 IFS=',' read -r -a DEV_ARR <<< "${CUDA_DEVICES}"
 DEVICE_COUNT="${#DEV_ARR[@]}"
 
-# Defaults by server (can still set batch size etc.)
+# Per-GPU batch calibrated to GPU VRAM (baseline: with wrist view)
 case "${SERVER}" in
   *pearl*)
     ulimit -n 65535 || true
-    BATCH_SIZE=512
+    GPU_VRAM=82
+    PER_GPU_BATCH=128   # 4x NVIDIA A100 ~82GB
     ;;
   *turing*|*rosenblatt*)
-    BATCH_SIZE=256
+    GPU_VRAM=50
+    PER_GPU_BATCH=64    # 4x NVIDIA RTX A6000 ~50GB
     ;;
   *lunar*)
-    BATCH_SIZE=128
+    GPU_VRAM=98
+    PER_GPU_BATCH=128   # 1x NVIDIA RTX PRO 6000 Blackwell ~98GB
     ;;
   *)
-    echo "Unknown server hostname '${SERVER}', using defaults."
-    BATCH_SIZE=128
+    echo "Unknown server '${SERVER}', using conservative defaults."
+    GPU_VRAM=50
+    PER_GPU_BATCH=64
     ;;
 esac
 
-# Use the number of visible devices for torchrun
 NUM_GPUS="${DEVICE_COUNT}"
 
-# If USE_WRIST_VIEW is false, scale batch size by 1.5x
+# Scale per-GPU batch when no wrist view (one fewer camera = less memory per sample)
 if [[ "${USE_WRIST_VIEW}" == "false" ]]; then
-  BATCH_SIZE=$(( BATCH_SIZE * 9 / 5 ))   # 1.8x (floors)
+  PER_GPU_BATCH=$(( PER_GPU_BATCH * 9 / 5 ))
 fi
 
-# Make sure BATCH_SIZE is divisible by NUM_GPUS (round down to nearest multiple)
-if (( BATCH_SIZE % NUM_GPUS != 0 )); then
-  OLD_BS="${BATCH_SIZE}"
-  BATCH_SIZE=$(( (BATCH_SIZE / NUM_GPUS) * NUM_GPUS ))
-  if (( BATCH_SIZE == 0 )); then
-    echo "ERROR: Batch size became 0 after making it divisible by NUM_GPUS=${NUM_GPUS} (old=${OLD_BS})."
-    exit 1
-  fi
-  echo "WARN: Adjusted BATCH_SIZE ${OLD_BS} -> ${BATCH_SIZE} to be divisible by NUM_GPUS=${NUM_GPUS}"
-fi
+# Global batch scales with GPU count; steps scale inversely — total samples seen stays constant
+BATCH_SIZE=$(( PER_GPU_BATCH * NUM_GPUS ))
+TOTAL_SAMPLES=7680000   # fixed training budget (30000 steps × 256 ref batch)
+N_CHECKPOINTS=6
+MAX_STEPS=$(( TOTAL_SAMPLES / BATCH_SIZE ))
+SAVE_STEPS=$(( MAX_STEPS / N_CHECKPOINTS ))
 
 
 BASE_MODEL="nvidia/GR00T-N1.6-3B"
@@ -94,7 +93,7 @@ fi
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
-HYPER_PARAMS="LONG_G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
+HYPER_PARAMS="RAW_SIM_G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
 
 if [[ "${ARM_ONLY}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
@@ -122,14 +121,8 @@ fi
 echo "================= FINETUNE NEW EMBODIMENT ================="
 echo "SERVER=${SERVER}"
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
-echo "NUM_GPUS=${NUM_GPUS}"
-REF_BATCH=256
-REF_MAX_STEPS=300000
-REF_SAVE_STEPS=5000
-MAX_STEPS=$(( REF_MAX_STEPS * REF_BATCH / BATCH_SIZE ))
-SAVE_STEPS=$(( REF_SAVE_STEPS * REF_BATCH / BATCH_SIZE ))
-
-echo "GLOBAL_BATCH_SIZE=${BATCH_SIZE}"
+echo "NUM_GPUS=${NUM_GPUS}  GPU_VRAM=${GPU_VRAM}GB  PER_GPU_BATCH=${PER_GPU_BATCH}"
+echo "GLOBAL_BATCH_SIZE=${BATCH_SIZE}  TOTAL_SAMPLES=${TOTAL_SAMPLES}"
 echo "MAX_STEPS=${MAX_STEPS}  SAVE_STEPS=${SAVE_STEPS}"
 echo "OUT=./output/${DATASET_NAME}/${HYPER_PARAMS}"
 
