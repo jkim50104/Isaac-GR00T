@@ -82,7 +82,7 @@ def scan_remote() -> dict[tuple[str, str], list[str]]:
       Legacy: {dataset}/{hparams}/checkpoint-N         (depth 3)
     """
     cmd = (
-        f"find {BASE_REMOTE} -mindepth 3 -maxdepth 4 -name 'checkpoint-*' -type d "
+        f"find -H {BASE_REMOTE} -mindepth 3 -maxdepth 4 -name 'checkpoint-*' -type d "
         f"2>/dev/null | sort"
     )
     lines = ssh_lines(cmd)
