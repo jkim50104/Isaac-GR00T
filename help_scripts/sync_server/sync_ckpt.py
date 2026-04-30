@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
+import shlex
 import socket
 import subprocess
-import shlex
-from pathlib import Path
 import sys
+from pathlib import Path
 
 # Machines allowed to RUN this script (local workstations).
 # Training servers are in REMOTE_SERVERS — running from one of those is blocked.
@@ -422,6 +422,11 @@ def main() -> None:
     for exp, hp, ck in verified:
         print(f"  {REMOTE}:{BASE_REMOTE}/{exp}/{hp}/{ck}")
 
+    verified_folders = sorted({(exp, hp) for exp, hp, _ in verified})
+    print("\n=== EMPTY FOLDER CLEANUP — if no checkpoint-* dirs remain ===")
+    for exp, hp in verified_folders:
+        print(f"  {REMOTE}:{BASE_REMOTE}/{exp}/{hp}")
+
     if not confirm("Proceed with remote deletion?"):
         print("\n❌ Aborted. Nothing deleted.")
         return
@@ -429,7 +434,7 @@ def main() -> None:
     print()
     for exp, hp, ck in verified:
         ssh_delete_ckpt(exp, hp, ck)
-    for exp, hp in sorted({(exp, hp) for exp, hp, _ in verified}):
+    for exp, hp in verified_folders:
         ssh_delete_folder_if_no_ckpts(exp, hp)
 
     print("\n🎉 Done.")
