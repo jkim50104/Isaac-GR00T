@@ -68,15 +68,14 @@ def list_remote_dirs(path: str) -> list[str]:
 def list_remote_experiments() -> list[str]:
     """List experiments as paths relative to BASE_REMOTE.
 
-    New structure:  v1.7/{real|sim}/{task}   → returned as "v1.7/real/pick_item"
-    Legacy structure: {exp_name}             → returned as-is (backwards compat)
+    New structure:  v1.7/{dataset_name}  → returned as "v1.7/ffw_sg2_rev1_pick_item"
+    Legacy structure: {exp_name}         → returned as-is (backwards compat)
     """
     exps = []
     for top in list_remote_dirs(BASE_REMOTE):
         if top.startswith("v"):
-            for mode in list_remote_dirs(f"{BASE_REMOTE}/{top}"):
-                for task in list_remote_dirs(f"{BASE_REMOTE}/{top}/{mode}"):
-                    exps.append(f"{top}/{mode}/{task}")
+            for dataset in list_remote_dirs(f"{BASE_REMOTE}/{top}"):
+                exps.append(f"{top}/{dataset}")
         else:
             if _prefix_ok(top):
                 exps.append(top)

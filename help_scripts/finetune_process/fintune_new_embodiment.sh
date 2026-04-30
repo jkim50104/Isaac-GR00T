@@ -108,7 +108,7 @@ fi
 if [[ "${DEBUG_MODE}" == "true" ]]; then
   HYPER_PARAMS="DEBUG_${HYPER_PARAMS}"
 fi
-OUTPUT_DIR="./output/v1.7/${RUN_MODE}/${TASK_NAME}/${DATE}_${HYPER_PARAMS}"
+OUTPUT_DIR="./output/v1.7/${DATASET_NAME}/${DATE}_${HYPER_PARAMS}"
 
 # make flags visible to all torchrun ranks
 export GR00T_ARM_ONLY="${ARM_ONLY}"
