@@ -1,0 +1,8 @@
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260111_132532-id338yzh/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260430_044532-0kdt69lm/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260423_164937-b5rablki/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260430_043722-cuf3l0pc/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260406_235844-vrmxclxb/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260108_175118-zpbnemi6/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/wandb/run-20260111_132248-ytqrxh8z/files/requirements.txt
+/home/jokim/projects/Isaac-GR00T/external_dependencies/robocasa-gr1-tabletop-tasks/images/fig_task_v6.pdf

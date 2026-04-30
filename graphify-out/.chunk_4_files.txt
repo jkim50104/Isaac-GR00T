@@ -1,0 +1,8 @@
+/home/jokim/projects/Isaac-GR00T/getting_started/data_config.md
+/home/jokim/projects/Isaac-GR00T/getting_started/real_world_deployment.md
+/home/jokim/projects/Isaac-GR00T/getting_started/hardware_recommendation.md
+/home/jokim/projects/Isaac-GR00T/getting_started/finetune_new_embodiment.md
+/home/jokim/projects/Isaac-GR00T/getting_started/data_preparation.md
+/home/jokim/projects/Isaac-GR00T/getting_started/policy.md
+/home/jokim/projects/Isaac-GR00T/docker/README.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/robocasa-gr1-tabletop-tasks/images/fig_task_v6.pdf

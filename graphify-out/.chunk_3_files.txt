@@ -1,0 +1,22 @@
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/external_dependencies/unitree_sdk2_python/README.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/external_dependencies/unitree_sdk2_python/README zh.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/external_dependencies/unitree_sdk2_python/example/g1/readme.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/gr00t_wbc/dexmg/gr00trobocasa/requirements.txt
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/gr00t_wbc/dexmg/gr00trobocasa/robocasa/utils/usd/README.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/gr00t_wbc/sim2mujoco/README.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/gr00t_wbc/sim2mujoco/requirements.txt
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/gr00t_wbc/sim2mujoco/resources/robots/g1/README.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/gr00t_wbc/control/teleop/device/SDKClient_Linux/Readme.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/GR00T-WholeBodyControl/docker/image_name.txt
+/home/jokim/projects/Isaac-GR00T/external_dependencies/robocasa-gr1-tabletop-tasks/README.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/robocasa-gr1-tabletop-tasks/requirements.txt
+/home/jokim/projects/Isaac-GR00T/external_dependencies/robocasa-gr1-tabletop-tasks/robocasa/models/assets/ASSETS_ATTRIBUTIONS.md
+/home/jokim/projects/Isaac-GR00T/external_dependencies/robocasa-gr1-tabletop-tasks/robocasa/models/robots/manipulators/README.md
+/home/jokim/projects/Isaac-GR00T/examples/LIBERO/README.md
+/home/jokim/projects/Isaac-GR00T/examples/SO100/README.md
+/home/jokim/projects/Isaac-GR00T/examples/mask-guided-background-suppression/README.md
+/home/jokim/projects/Isaac-GR00T/examples/DROID/README.md
+/home/jokim/projects/Isaac-GR00T/examples/SimplerEnv/README.md
+/home/jokim/projects/Isaac-GR00T/scripts/lerobot_conversion/README.md
+/home/jokim/projects/Isaac-GR00T/scripts/deployment/README.md
+/home/jokim/projects/Isaac-GR00T/tests/fixtures/README.md
