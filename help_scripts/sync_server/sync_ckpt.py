@@ -116,6 +116,35 @@ def scan_remote() -> dict[tuple[str, str], list[str]]:
     return result
 
 
+def scan_remote_hparam_folders() -> set[tuple[str, str]]:
+    """
+    Find experiment/hparam folders, including ones with no checkpoints left.
+
+    Handles both:
+      New:    v{ver}/{dataset}/{hparams}  (depth 3)
+      Legacy: {dataset}/{hparams}         (depth 2)
+    """
+    cmd = f"find -H {BASE_REMOTE} -mindepth 2 -maxdepth 3 -type d 2>/dev/null | sort"
+    lines = ssh_lines(cmd)
+
+    prefix = BASE_REMOTE.rstrip("/") + "/"
+    result: set[tuple[str, str]] = set()
+
+    for line in lines:
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix):].split("/")
+
+        if len(parts) == 3 and parts[0].startswith("v"):
+            result.add((f"{parts[0]}/{parts[1]}", parts[2]))
+        elif len(parts) == 2 and not parts[0].startswith("v"):
+            exp, hp = parts[0], parts[1]
+            if _prefix_ok(exp):
+                result.add((exp, hp))
+
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Copy
 # ---------------------------------------------------------------------------
@@ -144,6 +173,31 @@ def ssh_delete_folder_if_no_ckpts(exp: str, hp: str) -> None:
         f"then rm -rf {folder}; fi"
     )
     run(["ssh", REMOTE, cmd])
+
+
+def cleanup_empty_remote_folders(folders: list[tuple[str, str]]) -> None:
+    if not folders:
+        return
+
+    labels = [f"{exp}/{hp}" for exp, hp in folders]
+    selected = choose_items_menu("DELETE FROM REMOTE — folders with no checkpoints", labels)
+    if not selected:
+        print("\nNo checkpoint-empty folders deleted.")
+        return
+
+    selected_folders = [folders[labels.index(lbl)] for lbl in selected]
+
+    print("\n=== EMPTY FOLDER DELETE PREVIEW — from REMOTE(B) ===")
+    for exp, hp in selected_folders:
+        print(f"  {REMOTE}:{BASE_REMOTE}/{exp}/{hp}")
+
+    if not confirm("Proceed with deleting checkpoint-empty folders?"):
+        print("\n❌ Aborted. No folders deleted.")
+        return
+
+    print()
+    for exp, hp in selected_folders:
+        ssh_delete_folder_if_no_ckpts(exp, hp)
 
 
 def _local_ckpt_bytes(exp: str, hp: str, ckpt: str) -> int:
@@ -311,8 +365,11 @@ def main() -> None:
     print("[INFO] Scanning remote checkpoints (single SSH call)...")
 
     remote_ckpts = scan_remote()  # {(exp, hp): [ckpt, ...]}
+    empty_remote_folders = sorted(scan_remote_hparam_folders() - set(remote_ckpts))
 
     print(f"[INFO] Found {len(remote_ckpts)} experiment/hparam folder(s).")
+    if empty_remote_folders:
+        print(f"[INFO] Found {len(empty_remote_folders)} checkpoint-empty folder(s).")
 
     to_copy_by_folder: dict[tuple[str, str], list[str]] = {}
     to_delete_by_folder: dict[tuple[str, str], list[str]] = {}
@@ -374,6 +431,9 @@ def main() -> None:
     # ---------------------------
     # Delete phase
     # ---------------------------
+    if ENABLE_DELETE and empty_remote_folders:
+        cleanup_empty_remote_folders(empty_remote_folders)
+
     if not ENABLE_DELETE or not to_delete_by_folder:
         return
 
