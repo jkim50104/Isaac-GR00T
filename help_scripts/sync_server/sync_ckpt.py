@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
+import socket
 import subprocess
 from pathlib import Path
 import sys
 
-SERVERS = {
+# Machines allowed to RUN this script (local workstations).
+# Training servers are in REMOTE_SERVERS — running from one of those is blocked.
+LOCAL_HOSTS: tuple[str, ...] = ("lunar",)
+
+REMOTE_SERVERS: dict[str, str] = {
     "turing": "/home/jokim/projects/Isaac-GR00T/output",
-    "rosen": "/home/jokim/project/Isaac-GR00T/output",
-    "pearl": "/home/jokim/projects/Isaac-GR00T/output",
-    "lunar":  "/home/robi/projects/Isaac-GR00T/output",
+    "rosen":  "/home/jokim/project/Isaac-GR00T/output",
+    "pearl":  "/home/jokim/projects/Isaac-GR00T/output",
 }
 
-BASE_LOCAL = Path("output")  # Run from workspace
-REMOTE: str = ""       # SSH host alias, set by main() from SERVERS
-BASE_REMOTE: str = ""  # Remote checkpoint dir, set by main() from SERVERS
+BASE_LOCAL = Path("output")  # Run from workspace root
+REMOTE: str = ""             # SSH host alias, set by main()
+BASE_REMOTE: str = ""        # Remote output dir, set by main()
 
-# IMPORTANT: your remote has ffw_* dirs. If you filter only ai_worker_*, you'll see nothing.
-# None => include all. Or e.g. ("ffw_", "ai_worker_")
+# None => include all legacy experiments. Or e.g. ("ffw_", "ai_worker_")
 EXPERIMENT_PREFIXES: tuple[str, ...] | None = None
 
 SHOW_OK = True
-ENABLE_COPY = True  # master switch
+ENABLE_COPY = True    # master switch for copy
+ENABLE_DELETE = True  # master switch for remote deletion
 
+# Files that must exist for a checkpoint to be considered complete.
+_REQUIRED_CKPT_FILES = [
+    "config.json",
+    "training_args.bin",
+    "model.safetensors.index.json",
+]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def run(cmd: list[str]) -> None:
     print(">>", " ".join(cmd))
@@ -34,7 +49,6 @@ def _prefix_ok(name: str) -> bool:
 
 
 def ssh_lines(cmd: str) -> list[str]:
-    """Run a remote command and return non-empty stripped lines. Print debug on failure."""
     try:
         out = subprocess.check_output(
             ["ssh", REMOTE, cmd],
@@ -47,46 +61,6 @@ def ssh_lines(cmd: str) -> list[str]:
     return [line.strip() for line in out.splitlines() if line.strip()]
 
 
-def list_remote_dirs(path: str) -> list[str]:
-    """
-    List immediate child directory names under a remote path (portable).
-    """
-    entries = ssh_lines(f"ls -1 {path} 2>/dev/null || true")
-    if not entries:
-        return []
-
-    # Filter to dirs via a remote loop (portable)
-    cmd = (
-        f"cd {path} 2>/dev/null || exit 0; "
-        f"for x in *; do [ -d \"$x\" ] && echo \"$x\"; done"
-    )
-    dirs = ssh_lines(cmd)
-    dirs.sort()
-    return dirs
-
-
-def list_remote_experiments() -> list[str]:
-    """List experiments as paths relative to BASE_REMOTE.
-
-    New structure:  v1.7/{dataset_name}  → returned as "v1.7/ffw_sg2_rev1_pick_item"
-    Legacy structure: {exp_name}         → returned as-is (backwards compat)
-    """
-    exps = []
-    for top in list_remote_dirs(BASE_REMOTE):
-        if top.startswith("v"):
-            for dataset in list_remote_dirs(f"{BASE_REMOTE}/{top}"):
-                exps.append(f"{top}/{dataset}")
-        else:
-            if _prefix_ok(top):
-                exps.append(top)
-    exps.sort()
-    return exps
-
-
-def list_remote_hparams(exp: str) -> list[str]:
-    return list_remote_dirs(f"{BASE_REMOTE}/{exp}")
-
-
 def ckpt_sort_key(name: str):
     try:
         return int(name.split("-", 1)[1])
@@ -94,64 +68,177 @@ def ckpt_sort_key(name: str):
         return name
 
 
-def list_remote_ckpts(exp: str, hp: str) -> list[str]:
-    # Only checkpoint-* directories
-    entries = ssh_lines(f"ls -1 {BASE_REMOTE}/{exp}/{hp} 2>/dev/null || true")
-    ckpts = [x for x in entries if x.startswith("checkpoint-")]
-    ckpts.sort(key=ckpt_sort_key)
-    return ckpts
+# ---------------------------------------------------------------------------
+# Remote scan — single SSH call via find
+# ---------------------------------------------------------------------------
+
+def scan_remote() -> dict[tuple[str, str], list[str]]:
+    """
+    One SSH round-trip: find all checkpoint-* dirs under BASE_REMOTE.
+    Returns {(exp, hp): [ckpt, ...]} sorted by checkpoint step.
+
+    Handles both:
+      New:    v{ver}/{dataset}/{hparams}/checkpoint-N  (depth 4)
+      Legacy: {dataset}/{hparams}/checkpoint-N         (depth 3)
+    """
+    cmd = (
+        f"find {BASE_REMOTE} -mindepth 3 -maxdepth 4 -name 'checkpoint-*' -type d "
+        f"2>/dev/null | sort"
+    )
+    lines = ssh_lines(cmd)
+
+    prefix = BASE_REMOTE.rstrip("/") + "/"
+    result: dict[tuple[str, str], list[str]] = {}
+
+    for line in lines:
+        if not line.startswith(prefix):
+            continue
+        parts = line[len(prefix):].split("/")
+
+        if len(parts) == 4 and parts[0].startswith("v"):
+            exp, hp, ckpt = f"{parts[0]}/{parts[1]}", parts[2], parts[3]
+        elif len(parts) == 3:
+            exp, hp, ckpt = parts[0], parts[1], parts[2]
+            if not _prefix_ok(exp):
+                continue
+        else:
+            continue
+
+        if not ckpt.startswith("checkpoint-"):
+            continue
+
+        result.setdefault((exp, hp), []).append(ckpt)
+
+    for key in result:
+        result[key].sort(key=ckpt_sort_key)
+
+    return result
 
 
-def local_ckpt_exists(exp: str, hp: str, ckpt: str) -> bool:
-    return (BASE_LOCAL / exp / hp / ckpt).is_dir()
+# ---------------------------------------------------------------------------
+# Copy
+# ---------------------------------------------------------------------------
 
-
-def format_row(left: str, right: str, status: str, w: int) -> str:
-    return f"  {left:<{w}}  {right:<{w}}  {status}"
-
-
-def rsync_copy(exp: str, hp: str, ckpt: str):
+def rsync_copy(exp: str, hp: str, ckpt: str) -> None:
     src = f"{REMOTE}:{BASE_REMOTE}/{exp}/{hp}/{ckpt}/"
     dst = str((BASE_LOCAL / exp / hp / ckpt).resolve()) + "/"
     (BASE_LOCAL / exp / hp).mkdir(parents=True, exist_ok=True)
     run(["rsync", "-a", "--info=progress2", src, dst])
 
 
-# ---------------------------
+# ---------------------------------------------------------------------------
+# Delete + verification
+# ---------------------------------------------------------------------------
+
+def ssh_delete_ckpt(exp: str, hp: str, ckpt: str) -> None:
+    run(["ssh", REMOTE, f"rm -rf {BASE_REMOTE}/{exp}/{hp}/{ckpt}"])
+
+
+def _local_ckpt_bytes(exp: str, hp: str, ckpt: str) -> int:
+    return sum(
+        f.stat().st_size
+        for f in (BASE_LOCAL / exp / hp / ckpt).rglob("*")
+        if f.is_file()
+    )
+
+
+def _remote_ckpt_bytes_batch(keys: list[tuple[str, str, str]]) -> dict[tuple[str, str, str], int]:
+    """Single SSH du call for multiple checkpoint dirs."""
+    if not keys:
+        return {}
+    paths = " ".join(f"{BASE_REMOTE}/{exp}/{hp}/{ck}" for exp, hp, ck in keys)
+    lines = ssh_lines(f"du -sb {paths} 2>/dev/null")
+    prefix = BASE_REMOTE.rstrip("/") + "/"
+    sizes: dict[tuple[str, str, str], int] = {}
+    for line in lines:
+        tok = line.split(None, 1)
+        if len(tok) != 2:
+            continue
+        try:
+            size = int(tok[0])
+        except ValueError:
+            continue
+        path = tok[1]
+        if not path.startswith(prefix):
+            continue
+        parts = path[len(prefix):].split("/")
+        if len(parts) == 4 and parts[0].startswith("v"):
+            key: tuple[str, str, str] = (f"{parts[0]}/{parts[1]}", parts[2], parts[3])
+        elif len(parts) == 3:
+            key = (parts[0], parts[1], parts[2])
+        else:
+            continue
+        sizes[key] = size
+    return sizes
+
+
+def verify_batch(
+    candidates: list[tuple[str, str, str]],
+) -> dict[tuple[str, str, str], tuple[bool, str]]:
+    """Verify all candidates with one SSH round-trip for sizes."""
+    remote_sizes = _remote_ckpt_bytes_batch(candidates)
+    results: dict[tuple[str, str, str], tuple[bool, str]] = {}
+
+    for exp, hp, ck in candidates:
+        ckpt_path = BASE_LOCAL / exp / hp / ck
+
+        failed = False
+        for fname in _REQUIRED_CKPT_FILES:
+            if not (ckpt_path / fname).exists():
+                results[(exp, hp, ck)] = (False, f"MISSING FILE: {fname}")
+                failed = True
+                break
+        if failed:
+            continue
+
+        shards = list(ckpt_path.glob("model-*.safetensors"))
+        if not shards and not (ckpt_path / "pytorch_model.bin").exists():
+            results[(exp, hp, ck)] = (False, "MISSING FILE: model weights")
+            continue
+
+        local_sz = _local_ckpt_bytes(exp, hp, ck)
+        remote_sz = remote_sizes.get((exp, hp, ck), 0)
+
+        if remote_sz == 0:
+            results[(exp, hp, ck)] = (False, "could not read remote size")
+            continue
+
+        diff_pct = abs(local_sz - remote_sz) / remote_sz
+        gb = 1 << 30
+        if diff_pct > 0.01:
+            results[(exp, hp, ck)] = (
+                False,
+                f"SIZE MISMATCH: local={local_sz/gb:.2f}GB remote={remote_sz/gb:.2f}GB "
+                f"({diff_pct:.1%} diff)",
+            )
+        else:
+            results[(exp, hp, ck)] = (True, f"verified ({local_sz/gb:.2f} GB)")
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Interactive selection utils
-# ---------------------------
+# ---------------------------------------------------------------------------
 
 def _parse_index_set(s: str, n: int) -> set[int]:
-    """
-    Parse user input like:
-      "1 2 5", "1,2,5", "1-3,7", "all"
-    Returns 0-based indices.
-    """
     s = s.strip().lower()
     if s in {"a", "all"}:
         return set(range(n))
     if not s:
         return set()
-
     s = s.replace(",", " ")
-    parts = [p for p in s.split() if p]
-
     out: set[int] = set()
-    for p in parts:
+    for p in s.split():
         if "-" in p:
             lo, hi = p.split("-", 1)
             try:
-                lo_i = int(lo)
-                hi_i = int(hi)
+                lo0, hi0 = int(lo) - 1, int(hi) - 1
             except ValueError:
                 continue
-            lo0 = lo_i - 1
-            hi0 = hi_i - 1
             if lo0 > hi0:
                 lo0, hi0 = hi0, lo0
-            for i in range(lo0, hi0 + 1):
-                if 0 <= i < n:
-                    out.add(i)
+            out.update(i for i in range(lo0, hi0 + 1) if 0 <= i < n)
         else:
             try:
                 i = int(p) - 1
@@ -163,20 +250,11 @@ def _parse_index_set(s: str, n: int) -> set[int]:
 
 
 def choose_items_menu(title: str, items: list[str]) -> list[str]:
-    """
-    Show numbered list and allow user to pick indices or all.
-    Returns selected items (strings).
-    """
     print(f"\n=== {title} ===")
     for i, it in enumerate(items, 1):
         print(f"  [{i:>2}] {it}")
-
-    print("\nSelect by index (e.g. '1 3 5' or '1-3,7') or 'all'.")
-    print("Type empty / anything invalid to abort.")
-    ans = input("> ").strip()
-    idxs = _parse_index_set(ans, len(items))
-    if not idxs:
-        return []
+    print("\nSelect by index (e.g. '1 3 5' or '1-3,7') or 'all'. Empty to skip.")
+    idxs = _parse_index_set(input("> ").strip(), len(items))
     return [items[i] for i in sorted(idxs)]
 
 
@@ -186,126 +264,159 @@ def confirm(prompt: str) -> bool:
     return input("> ").strip().lower() == "yes"
 
 
-def main():
+def format_row(left: str, right: str, status: str, w: int) -> str:
+    return f"  {left:<{w}}  {right:<{w}}  {status}"
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    hostname = socket.gethostname()
+    if any(h in hostname for h in REMOTE_SERVERS):
+        print(f"[ERROR] Must run from a local machine. Current host: {hostname}")
+        print(f"  Remote servers (not allowed): {', '.join(REMOTE_SERVERS)}")
+        sys.exit(1)
+
     if len(sys.argv) < 2:
         print("Usage: sync_ckpt.py <server>")
-        print("\nAvailable servers:")
-        for name, path in SERVERS.items():
+        print("\nAvailable remote servers:")
+        for name, path in REMOTE_SERVERS.items():
             print(f"  {name:<12} {path}")
         sys.exit(0)
 
     server = sys.argv[1]
-    if server not in SERVERS:
-        print(f"Unknown server: {server}")
-        print(f"Available: {', '.join(SERVERS)}")
+    if server not in REMOTE_SERVERS:
+        print(f"Unknown server: {server}  (available: {', '.join(REMOTE_SERVERS)})")
         sys.exit(1)
 
     global REMOTE, BASE_REMOTE
     REMOTE = server
-    BASE_REMOTE = SERVERS[server]
+    BASE_REMOTE = REMOTE_SERVERS[server]
 
-    remote_exps = list_remote_experiments()
+    print(f"[INFO] REMOTE={REMOTE}  BASE_REMOTE={BASE_REMOTE}")
+    print("[INFO] Scanning remote checkpoints (single SSH call)...")
 
-    print(f"[INFO] REMOTE={REMOTE}")
-    print(f"[INFO] BASE_REMOTE={BASE_REMOTE}")
-    print(f"[INFO] found remote experiments: {len(remote_exps)}")
-    if remote_exps:
-        print(f"[INFO] first few: {remote_exps[:5]}")
+    remote_ckpts = scan_remote()  # {(exp, hp): [ckpt, ...]}
 
-    # (exp, hp) -> [ckpt, ckpt, ...]
+    print(f"[INFO] Found {len(remote_ckpts)} experiment/hparam folder(s).")
+
     to_copy_by_folder: dict[tuple[str, str], list[str]] = {}
+    to_delete_by_folder: dict[tuple[str, str], list[str]] = {}
 
-    for exp in remote_exps:
-        hps = list_remote_hparams(exp)
-        if not hps:
-            continue
-
-        for hp in hps:
-            ckpts = list_remote_ckpts(exp, hp)
-            if not ckpts:
-                continue
-
-            w = max([len("(missing)"), *(len(x) for x in ckpts)] or [10])
-
-            print(f"\n=== {exp}/{hp}/ ===")
-            print(f"  {'LOCAL(A)':<{w}}  {'REMOTE(B)':<{w}}  STATUS")
-            print(f"  {'-'*w}  {'-'*w}  ------")
-
-            for ck in ckpts:
-                if local_ckpt_exists(exp, hp, ck):
-                    if SHOW_OK:
-                        print(format_row(ck, ck, "OK", w))
-                else:
-                    print(format_row("(missing)", ck, "MISSING_ON_A", w))
-                    key = (exp, hp)
-                    to_copy_by_folder.setdefault(key, []).append(ck)
-
-    if not ENABLE_COPY or not to_copy_by_folder:
-        print("\nNo checkpoints need copying.")
-        return
+    for (exp, hp), ckpts in sorted(remote_ckpts.items()):
+        w = max(len("(missing)"), *(len(c) for c in ckpts))
+        print(f"\n=== {exp}/{hp}/ ===")
+        print(f"  {'LOCAL(A)':<{w}}  {'REMOTE(B)':<{w}}  STATUS")
+        print(f"  {'-'*w}  {'-'*w}  ------")
+        for ck in ckpts:
+            if (BASE_LOCAL / exp / hp / ck).is_dir():
+                if SHOW_OK:
+                    print(format_row(ck, ck, "OK (can delete remote)", w))
+                to_delete_by_folder.setdefault((exp, hp), []).append(ck)
+            else:
+                print(format_row("(missing)", ck, "MISSING_ON_A", w))
+                to_copy_by_folder.setdefault((exp, hp), []).append(ck)
 
     # ---------------------------
-    # Step 1: choose folders
+    # Copy phase
     # ---------------------------
-    folder_keys = sorted(to_copy_by_folder.keys())
-    folder_labels = [f"{exp}/{hp}" for exp, hp in folder_keys]
+    if ENABLE_COPY and to_copy_by_folder:
+        folder_keys = sorted(to_copy_by_folder)
+        folder_labels = [f"{e}/{h}" for e, h in folder_keys]
 
-    selected_folders = choose_items_menu(
-        "COPY PREVIEW (Folders with missing checkpoints)",
-        folder_labels,
-    )
-    if not selected_folders:
-        print("\n❌ Aborted. No files were copied.")
-        sys.exit(0)
+        selected = choose_items_menu("COPY — folders with missing checkpoints", folder_labels)
 
-    selected_folder_keys = [folder_keys[folder_labels.index(lbl)] for lbl in selected_folders]
+        final_to_copy: list[tuple[str, str, str]] = []
+        for lbl in selected:
+            exp, hp = folder_keys[folder_labels.index(lbl)]
+            ckpts = to_copy_by_folder[(exp, hp)]
+            print(f"\n=== {exp}/{hp} ===")
+            print("  [1] Download ALL  [2] Select by index  [3] Skip")
+            choice = input("> ").strip()
+            if choice == "1":
+                final_to_copy.extend((exp, hp, ck) for ck in ckpts)
+            elif choice == "2":
+                for ck in choose_items_menu(f"{exp}/{hp}", ckpts):
+                    final_to_copy.append((exp, hp, ck))
+            else:
+                print("Skipping.")
 
-    # ---------------------------
-    # Step 2: per folder choose ckpts (all or indexed)
-    # ---------------------------
-    final_to_copy: list[tuple[str, str, str]] = []
-
-    for (exp, hp) in selected_folder_keys:
-        ckpts = sorted(to_copy_by_folder[(exp, hp)], key=ckpt_sort_key)
-        folder_title = f"{exp}/{hp} (missing checkpoints)"
-
-        print(f"\n=== {folder_title} ===")
-        print("Options:")
-        print("  [1] Download ALL missing checkpoints in this folder")
-        print("  [2] Select checkpoints by index")
-        print("  [3] Skip this folder")
-        choice = input("> ").strip()
-
-        if choice == "1":
-            for ck in ckpts:
-                final_to_copy.append((exp, hp, ck))
-        elif choice == "2":
-            picked = choose_items_menu(folder_title, ckpts)
-            for ck in picked:
-                final_to_copy.append((exp, hp, ck))
+        if final_to_copy:
+            print("\n=== COPY PREVIEW — REMOTE(B) → LOCAL(A) ===")
+            for exp, hp, ck in final_to_copy:
+                print(f"  {exp}/{hp}/{ck}")
+            if confirm("Proceed with copying?"):
+                print()
+                for exp, hp, ck in final_to_copy:
+                    rsync_copy(exp, hp, ck)
+                print("\n🎉 Copy done.")
+            else:
+                print("\n❌ Copy aborted.")
         else:
-            print("Skipping.")
-            continue
+            print("\nNo checkpoints selected for copy.")
+    else:
+        print("\nNo checkpoints need copying.")
 
-    if not final_to_copy:
-        print("\nNo checkpoints selected. Nothing to copy.")
+    # ---------------------------
+    # Delete phase
+    # ---------------------------
+    if not ENABLE_DELETE or not to_delete_by_folder:
         return
 
-    # ---------------------------
-    # Final preview + confirm
-    # ---------------------------
-    print("\n=== FINAL COPY PREVIEW ===")
-    print("The following checkpoints WILL BE COPIED from REMOTE(B) → LOCAL(A):\n")
-    for exp, hp, ck in final_to_copy:
-        print(f"  {exp}/{hp}/{ck}")
+    del_folder_keys = sorted(to_delete_by_folder)
+    del_folder_labels = [f"{e}/{h}" for e, h in del_folder_keys]
 
-    if not confirm("Proceed with copying?"):
-        print("\n❌ Aborted. No files were copied.")
-        sys.exit(0)
+    selected_del = choose_items_menu(
+        "DELETE FROM REMOTE — checkpoints already synced locally",
+        del_folder_labels,
+    )
+    if not selected_del:
+        print("\nNo remote checkpoints deleted.")
+        return
 
-    print("\n✅ Starting copy...\n")
-    for exp, hp, ck in final_to_copy:
-        rsync_copy(exp, hp, ck)
+    final_to_delete: list[tuple[str, str, str]] = []
+    for lbl in selected_del:
+        exp, hp = del_folder_keys[del_folder_labels.index(lbl)]
+        ckpts = to_delete_by_folder[(exp, hp)]
+        for ck in choose_items_menu(f"{exp}/{hp} — pick checkpoints to delete", ckpts):
+            final_to_delete.append((exp, hp, ck))
+
+    if not final_to_delete:
+        print("\nNo remote checkpoints selected.")
+        return
+
+    print("\n=== VERIFYING LOCAL CHECKPOINTS (single SSH call) ===")
+    verification = verify_batch(final_to_delete)
+
+    verified: list[tuple[str, str, str]] = []
+    for exp, hp, ck in final_to_delete:
+        ok, reason = verification.get((exp, hp, ck), (False, "not checked"))
+        mark = "✅" if ok else "❌"
+        print(f"  {mark} {exp}/{hp}/{ck}  — {reason}")
+        if ok:
+            verified.append((exp, hp, ck))
+
+    blocked = [t for t in final_to_delete if t not in verified]
+    if blocked:
+        print(f"\n⚠️  {len(blocked)} checkpoint(s) failed verification — will NOT be deleted.")
+
+    if not verified:
+        print("\nNo checkpoints passed verification. Nothing deleted.")
+        return
+
+    print("\n=== DELETE PREVIEW — from REMOTE(B) ===")
+    for exp, hp, ck in verified:
+        print(f"  {REMOTE}:{BASE_REMOTE}/{exp}/{hp}/{ck}")
+
+    if not confirm("Proceed with remote deletion?"):
+        print("\n❌ Aborted. Nothing deleted.")
+        return
+
+    print()
+    for exp, hp, ck in verified:
+        ssh_delete_ckpt(exp, hp, ck)
 
     print("\n🎉 Done.")
 
