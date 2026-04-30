@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import socket
 import subprocess
+import shlex
 from pathlib import Path
 import sys
 
@@ -132,6 +133,17 @@ def rsync_copy(exp: str, hp: str, ckpt: str) -> None:
 
 def ssh_delete_ckpt(exp: str, hp: str, ckpt: str) -> None:
     run(["ssh", REMOTE, f"rm -rf {BASE_REMOTE}/{exp}/{hp}/{ckpt}"])
+
+
+def ssh_delete_folder_if_no_ckpts(exp: str, hp: str) -> None:
+    folder = shlex.quote(f"{BASE_REMOTE}/{exp}/{hp}")
+    cmd = (
+        f"if [ -d {folder} ] && "
+        f"""[ -z "$(find -H {folder} -mindepth 1 -maxdepth 1 """
+        f"""-name 'checkpoint-*' -type d -print -quit)" ]; """
+        f"then rm -rf {folder}; fi"
+    )
+    run(["ssh", REMOTE, cmd])
 
 
 def _local_ckpt_bytes(exp: str, hp: str, ckpt: str) -> int:
@@ -417,6 +429,8 @@ def main() -> None:
     print()
     for exp, hp, ck in verified:
         ssh_delete_ckpt(exp, hp, ck)
+    for exp, hp in sorted({(exp, hp) for exp, hp, _ in verified}):
+        ssh_delete_folder_if_no_ckpts(exp, hp)
 
     print("\n🎉 Done.")
 
