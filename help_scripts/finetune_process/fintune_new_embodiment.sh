@@ -11,11 +11,13 @@ ACTION_REP=REL  # "ABS" or "REL"
 
 # ---- args ----
 SIM_MODE=false
+DEBUG_MODE=false
 POSITIONAL=()
 for arg in "$@"; do
   case "$arg" in
-    --sim) SIM_MODE=true ;;
-    *)     POSITIONAL+=("$arg") ;;
+    --sim)   SIM_MODE=true ;;
+    --debug) DEBUG_MODE=true ;;
+    *)       POSITIONAL+=("$arg") ;;
   esac
 done
 set -- "${POSITIONAL[@]}"
@@ -36,7 +38,8 @@ else
   DATA_ROOT="./data/jkim50104"
 fi
 
-DATASET_NAME="${DATASET_PREFIX}$1"
+TASK_NAME="$1"
+DATASET_NAME="${DATASET_PREFIX}${TASK_NAME}"
 CUDA_DEVICES="${2:-0,1,2,3}"
 export CUDA_VISIBLE_DEVICES="$CUDA_DEVICES"
 
@@ -53,7 +56,7 @@ case "${SERVER}" in
     ;;
   *turing*|*rosenblatt*)
     GPU_VRAM=50
-    PER_GPU_BATCH=64    # 4x NVIDIA RTX A6000 ~50GB
+    PER_GPU_BATCH=80    # 4x NVIDIA RTX A6000 ~50GB
     ;;
   *lunar*)
     GPU_VRAM=98
@@ -81,7 +84,7 @@ MAX_STEPS=$(( TOTAL_SAMPLES / BATCH_SIZE ))
 SAVE_STEPS=$(( MAX_STEPS / N_CHECKPOINTS ))
 
 
-BASE_MODEL="nvidia/GR00T-N1.6-3B"
+BASE_MODEL="nvidia/GR00T-N1.7-3B"
 DATASET_PATH="${DATA_ROOT}/${DATASET_NAME}"
 
 if [[ ! -d "${DATASET_PATH}" ]]; then
@@ -93,14 +96,19 @@ fi
 EMBODIMENT_TAG="NEW_EMBODIMENT"
 
 CONFIG="ai_worker_config.py"
-HYPER_PARAMS="RAW_SIM_G${NUM_GPUS}_B${BATCH_SIZE}_${ACTION_REP}"
-
+RUN_MODE="$( [[ "${SIM_MODE}" == "true" ]] && echo "sim" || echo "real" )"
+DATE="$(date +%Y%m%d)"
+HYPER_PARAMS="B${BATCH_SIZE}_${ACTION_REP}"
 if [[ "${ARM_ONLY}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
 fi
 if [[ "${USE_WRIST_VIEW}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_WR"
 fi
+if [[ "${DEBUG_MODE}" == "true" ]]; then
+  HYPER_PARAMS="DEBUG_${HYPER_PARAMS}"
+fi
+OUTPUT_DIR="./output/v1.7/${RUN_MODE}/${TASK_NAME}/${DATE}_${HYPER_PARAMS}"
 
 # make flags visible to all torchrun ranks
 export GR00T_ARM_ONLY="${ARM_ONLY}"
@@ -124,7 +132,7 @@ echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}"
 echo "NUM_GPUS=${NUM_GPUS}  GPU_VRAM=${GPU_VRAM}GB  PER_GPU_BATCH=${PER_GPU_BATCH}"
 echo "GLOBAL_BATCH_SIZE=${BATCH_SIZE}  TOTAL_SAMPLES=${TOTAL_SAMPLES}"
 echo "MAX_STEPS=${MAX_STEPS}  SAVE_STEPS=${SAVE_STEPS}"
-echo "OUT=./output/${DATASET_NAME}/${HYPER_PARAMS}"
+echo "OUT=${OUTPUT_DIR}"
 
 torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
   gr00t/experiment/launch_finetune.py \
@@ -133,7 +141,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
   --embodiment-tag "${EMBODIMENT_TAG}" \
   --modality-config-path "./help_scripts/data_config/${CONFIG}" \
   --num-gpus "${NUM_GPUS}" \
-  --output-dir "./output/${DATASET_NAME}/${HYPER_PARAMS}" \
+  --output-dir "${OUTPUT_DIR}" \
   --save-total-limit 2 \
   --save-steps "${SAVE_STEPS}" \
   --max-steps "${MAX_STEPS}" \

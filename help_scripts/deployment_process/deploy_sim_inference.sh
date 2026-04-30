@@ -28,7 +28,7 @@ as_bool() {
 }
 
 # Server / model
-MODEL_PATH="${MODEL_PATH:-output/sim_pick_pringles/G4_B920_REL_AO/checkpoint-20000}"
+MODEL_PATH="${MODEL_PATH:-output/v1.7/sim/pick_pringles/20260430_B576_REL_AO/checkpoint-13333}"
 EMBODIMENT_TAG="${EMBODIMENT_TAG:-NEW_EMBODIMENT}"
 POLICY_HOST="${POLICY_HOST:-127.0.0.1}"
 POLICY_PORT="${POLICY_PORT:-5555}"

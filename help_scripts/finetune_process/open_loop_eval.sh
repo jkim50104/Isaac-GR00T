@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 source .venv/bin/activate
 
-CKPT="output/ffw_sg2_rev1_base_drive_test/G4_B512_REL/checkpoint-10000"
+CKPT="output/v1.7/real/base_drive_test/20260430_B576_REL/checkpoint-10000"
 
 python gr00t/eval/open_loop_eval.py \
     --dataset-path ./data/jkim50104/ffw_sg2_rev1_base_drive_test \
