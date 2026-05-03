@@ -5,7 +5,7 @@ source .venv/bin/activate
 SERVER="$(hostname -s)"
 
 # Global finetune settings
-USE_WRIST_VIEW=false
+USE_WRIST_VIEW=true
 ARM_ONLY=true
 ACTION_REP=REL  # "ABS" or "REL"
 
@@ -52,7 +52,7 @@ case "${SERVER}" in
   *pearl*)
     ulimit -n 65535 || true
     GPU_VRAM=82
-    PER_GPU_BATCH=128   # 4x NVIDIA A100 ~82GB
+    PER_GPU_BATCH=336   # 4x NVIDIA A100 ~82GB
     ;;
   *turing*|*rosenblatt*)
     GPU_VRAM=50
@@ -60,7 +60,7 @@ case "${SERVER}" in
     ;;
   *lunar*)
     GPU_VRAM=98
-    PER_GPU_BATCH=128   # 1x NVIDIA RTX PRO 6000 Blackwell ~98GB
+    PER_GPU_BATCH=360   # 1x NVIDIA RTX PRO 6000 Blackwell ~98GB
     ;;
   *)
     echo "Unknown server '${SERVER}', using conservative defaults."
@@ -78,7 +78,7 @@ fi
 
 # Global batch scales with GPU count; steps scale inversely — total samples seen stays constant
 BATCH_SIZE=$(( PER_GPU_BATCH * NUM_GPUS ))
-TOTAL_SAMPLES=7680000   # fixed training budget (30000 steps × 256 ref batch)
+TOTAL_SAMPLES=76800000   # fixed training budget (30000 steps × 256 ref batch)
 N_CHECKPOINTS=6
 SAVE_STEPS=$(( TOTAL_SAMPLES / BATCH_SIZE / N_CHECKPOINTS ))
 MAX_STEPS=$(( SAVE_STEPS * N_CHECKPOINTS ))
@@ -98,7 +98,7 @@ EMBODIMENT_TAG="NEW_EMBODIMENT"
 CONFIG="ai_worker_config.py"
 RUN_MODE="$( [[ "${SIM_MODE}" == "true" ]] && echo "sim" || echo "real" )"
 DATE="$(date +%Y%m%d)"
-HYPER_PARAMS="B${BATCH_SIZE}_${ACTION_REP}"
+HYPER_PARAMS="Debug_B${BATCH_SIZE}_${ACTION_REP}"
 if [[ "${ARM_ONLY}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
 fi
