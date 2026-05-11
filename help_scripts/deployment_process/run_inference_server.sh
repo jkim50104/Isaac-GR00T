@@ -6,9 +6,10 @@
 
 # ======================== CONFIG ========================
 # Shared with deploy_robot.sh — it sources this file for MODEL_PATH/POLICY_*.
-# MODEL_PATH="output/v1.7/real/clean_the_table/20260430_B512_REL_AO_WR/checkpoint-5000"
-# MODEL_PATH="output/v1.7/real/pick_item/20260430_B576_REL_AO/checkpoint-13333"
-MODEL_PATH="output/v1.7/sim/table_pnp/20260430_B576_REL_AO/checkpoint-13333"
+# MODEL_PATH="output/v1.6/real/clean_the_table/20260430_B512_REL_AO_WR/checkpoint-5000"
+# MODEL_PATH="output/v1.6/real/pick_item/20260430_B576_REL_AO/checkpoint-13333"
+# MODEL_PATH="output/v1.6/sim/table_pnp/20260430_B576_REL_AO/checkpoint-13333"
+MODEL_PATH="output/v1.7/sim_ffw_sg2_138_417_table_pnp/20260430_B288_REL_AO/checkpoint-26666"
 
 POLICY_HOST="localhost"
 POLICY_PORT=5555
