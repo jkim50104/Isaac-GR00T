@@ -6,7 +6,7 @@ SERVER="$(hostname -s)"
 
 # Global finetune settings
 USE_WRIST_VIEW=true
-ARM_ONLY=true
+ARM_ONLY=false
 ACTION_REP=REL  # "ABS" or "REL"
 
 # ---- args ----
@@ -78,7 +78,10 @@ fi
 
 # Global batch scales with GPU count; steps scale inversely — total samples seen stays constant
 BATCH_SIZE=$(( PER_GPU_BATCH * NUM_GPUS ))
-TOTAL_SAMPLES=76800000   # fixed training budget (30000 steps × 256 ref batch)
+TOTAL_SAMPLES=7680000   # fixed training budget (30000 steps × 256 ref batch)
+if [[ "${DEBUG_MODE}" == "true" ]]; then
+  TOTAL_SAMPLES=$(( TOTAL_SAMPLES * 10 ))
+fi
 N_CHECKPOINTS=6
 SAVE_STEPS=$(( TOTAL_SAMPLES / BATCH_SIZE / N_CHECKPOINTS ))
 MAX_STEPS=$(( SAVE_STEPS * N_CHECKPOINTS ))
@@ -98,7 +101,7 @@ EMBODIMENT_TAG="NEW_EMBODIMENT"
 CONFIG="ai_worker_config.py"
 RUN_MODE="$( [[ "${SIM_MODE}" == "true" ]] && echo "sim" || echo "real" )"
 DATE="$(date +%Y%m%d)"
-HYPER_PARAMS="Debug_B${BATCH_SIZE}_${ACTION_REP}"
+HYPER_PARAMS="B${BATCH_SIZE}_${ACTION_REP}"
 if [[ "${ARM_ONLY}" == "true" ]]; then
   HYPER_PARAMS="${HYPER_PARAMS}_AO"
 fi

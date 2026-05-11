@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pull experiment datasets from a remote server to local (missing files only).
 
-Supported remotes: lunar, turing, pearl, rosen, ai_worker.
+Supported remotes: lunar, turing, pearl, rosen, hinton, ai_worker.
 ai_worker is a robot server — this script must be run from lunar to reach it.
 
 All datasets in DATASETS are synced (jkim50104, ACS_ROBI).
@@ -28,7 +28,7 @@ from pathlib import Path
 # ---------------------------
 # Config
 # ---------------------------
-SERVERS = ["lunar", "turing", "pearl", "rosen", "ai_worker"]
+SERVERS = ["lunar", "turing", "pearl", "rosen", "hinton", "ai_worker"]
 DATASETS = ["jkim50104", "ACS_ROBI"]
 
 # ai_worker can only be reached from this machine.
@@ -36,6 +36,7 @@ AI_WORKER_GATEWAY = "lunar"
 
 SERVER_PATHS = {
     "ai_worker": "projects/physical_ai_tools/docker/huggingface/lerobot",
+    "hinton": "/data1/jokim/datasets/lerobot",
 }
 DEFAULT_SERVER_PATH = "projects/Isaac-GR00T/data"
 
