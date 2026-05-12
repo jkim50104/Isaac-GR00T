@@ -722,10 +722,27 @@ class AiWorkerCommandSender(Node):
       - base is Twist velocities: [lin.x, lin.y, ang.z]
     """
 
+    # Hysteresis for absolute-position joints: skip publish if mean commanded
+    # position across chunk is within this many radians of last sent command.
+    HEAD_HYSTERESIS: float = 0.01   # ~0.57 deg
+    LIFT_HYSTERESIS: float = 0.01  # lift units (meters or rad depending on hw)
+
+    # Dead-zone for base velocity: zero out each component below this threshold.
+    BASE_DEAD_ZONE: float = 0.00   # m/s or rad/s
+
     def __init__(self, enabled_action_keys: List[str]):
         super().__init__("ai_worker_command_sender")
-        
+
         self.enabled_action_keys = list(enabled_action_keys)
+
+        # Tracks mean commanded position of last sent chunk (for hysteresis).
+        self._last_head_mean: Optional[np.ndarray] = None
+        self._last_lift_mean: Optional[np.ndarray] = None
+
+        # Base velocity chunk replay state.
+        self._base_seq: List[np.ndarray] = []
+        self._base_step_idx: int = 0
+        self._base_timer = None
 
         # Publishers (same topics as your reference code)
         self.pub_left = self.create_publisher(
@@ -801,10 +818,11 @@ class AiWorkerCommandSender(Node):
         dt_per_point = exec_sec / K
 
         # ---- Left / Right arms+grippers (publish only if present) ----
-        has_left_arm = "left_arm" in self.enabled_action_keys
-        has_left_grip = "left_gripper" in self.enabled_action_keys
-        has_right_arm = "right_arm" in self.enabled_action_keys
-        has_right_grip = "right_gripper" in self.enabled_action_keys
+        first = action_seq[0]
+        has_left_arm = "left_arm" in self.enabled_action_keys and "left_arm" in first
+        has_left_grip = "left_gripper" in self.enabled_action_keys and "left_gripper" in first
+        has_right_arm = "right_arm" in self.enabled_action_keys and "right_arm" in first
+        has_right_grip = "right_gripper" in self.enabled_action_keys and "right_gripper" in first
 
         if has_left_arm and has_left_grip:
             left_arm = np.stack([a["left_arm"] for a in action_seq], axis=0)       # (K,7)
@@ -822,24 +840,59 @@ class AiWorkerCommandSender(Node):
         elif has_right_arm or has_right_grip:
             self.get_logger().warn("Config includes only one of right_arm/right_gripper; skipping right trajectory publish.")
 
-        # ---- Head (optional) ----
-        if "head" in self.enabled_action_keys:
+        # ---- Head (optional, absolute position + hysteresis) ----
+        if "head" in self.enabled_action_keys and "head" in first:
             head = np.stack([a["head"] for a in action_seq], axis=0)  # (K,2)
-            self.pub_head.publish(self._traj_msg_multi(self.head_joint_names, head, dt_per_point))
+            head_mean = head.mean(axis=0)
+            if (
+                self._last_head_mean is None
+                or np.max(np.abs(head_mean - self._last_head_mean)) >= self.HEAD_HYSTERESIS
+            ):
+                self.pub_head.publish(self._traj_msg_multi(self.head_joint_names, head, dt_per_point))
+                self._last_head_mean = head_mean
 
-        # ---- Lift (optional) ----
-        if "lift" in self.enabled_action_keys:
+        # ---- Lift (optional, absolute position + hysteresis) ----
+        if "lift" in self.enabled_action_keys and "lift" in first:
             lift = np.stack([a["lift"] for a in action_seq], axis=0)  # (K,1)
-            self.pub_lift.publish(self._traj_msg_multi(self.lift_joint_names, lift, dt_per_point))
+            lift_mean = lift.mean(axis=0)
+            if (
+                self._last_lift_mean is None
+                or np.max(np.abs(lift_mean - self._last_lift_mean)) >= self.LIFT_HYSTERESIS
+            ):
+                self.pub_lift.publish(self._traj_msg_multi(self.lift_joint_names, lift, dt_per_point))
+                self._last_lift_mean = lift_mean
 
-        # ---- Base (optional) ----
-        if "base" in self.enabled_action_keys:
-            base = np.asarray(action_seq[-1]["base"]).reshape(3)
+        # ---- Base (optional, velocity + per-dim dead-zone) ----
+        # Replay each step of the chunk at dt_per_point intervals via a timer
+        # so the smooth velocity ramp is faithfully executed.
+        if "base" in self.enabled_action_keys and "base" in first:
+            if self._base_timer is not None:
+                self._base_timer.cancel()
+                self._base_timer = None
+
+            base_seq = []
+            for a in action_seq:
+                v = np.asarray(a["base"]).reshape(3).copy()
+                v[np.abs(v) < self.BASE_DEAD_ZONE] = 0.0
+                base_seq.append(v)
+
+            self._base_seq = base_seq
+            self._base_step_idx = 0
+            self._base_timer = self.create_timer(dt_per_point, self._base_timer_cb)
+
+    def _base_timer_cb(self):
+        if self._base_step_idx < len(self._base_seq):
+            v = self._base_seq[self._base_step_idx]
             tw = Twist()
-            tw.linear.x = float(base[0])
-            tw.linear.y = float(base[1])
-            tw.angular.z = float(base[2])
+            tw.linear.x = float(v[0])
+            tw.linear.y = float(v[1])
+            tw.angular.z = float(v[2])
             self.pub_base.publish(tw)
+            self._base_step_idx += 1
+        else:
+            self._base_timer.cancel()
+            self._base_timer = None
+            self.pub_base.publish(Twist())  # zero velocity when chunk is done
 
 
 # -----------------------------------------------------------------------------
@@ -1171,6 +1224,8 @@ def run_eval_loop(
     on_obs=None,
     on_status=None,
     get_action_horizon=None,
+    on_action=None,
+    get_action_mask=None,
     use_ros=True,
 ):
     """
@@ -1244,6 +1299,17 @@ def run_eval_loop(
 
         if should_stop():
             break
+
+        if on_action:
+            on_action(action_seq)
+
+        if get_action_mask:
+            disabled = get_action_mask()
+            if disabled:
+                action_seq = [
+                    {k: v for k, v in step.items() if k not in disabled}
+                    for step in action_seq
+                ]
 
         sender.send_action_sequence_1s(action_seq, exec_sec=exec_sec)
         time_checker.mark_execution_start()

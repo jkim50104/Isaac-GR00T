@@ -17,11 +17,14 @@ import importlib.util
 
 import numpy as np
 import cv2
+import matplotlib.cm as mpl_cm
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QLineEdit, QSpinBox, QSlider, QSizePolicy,
-    QInputDialog,
+    QInputDialog, QCheckBox, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -137,6 +140,134 @@ def _build_ref_camera_row(ref_frames, model_keys, target_h=200):
 
 
 # ---------------------------------------------------------------------------
+# Action history visualization
+# ---------------------------------------------------------------------------
+
+class ActionHistoryViz:
+    """
+    Renders a rolling action-history plot as a numpy uint8 RGB image.
+
+    One subplot per action key; each dimension of a key gets its own colored line.
+    Raw model output is always stored (masking only affects visual style, not data).
+    """
+
+    WINDOW = 300
+    FIG_W_IN = 12
+    ROW_H_IN = 1.8
+    DPI = 90
+    _MASKED_BG = "#330000"
+    _NORMAL_BG = "#1a1a1a"
+    _DIMS = {
+        "left_arm": 7, "left_gripper": 1,
+        "right_arm": 7, "right_gripper": 1,
+        "head": 2, "lift": 1, "base": 3,
+    }
+
+    def __init__(self, action_keys):
+        self._action_keys = list(action_keys)
+        self._dims = {k: self._DIMS.get(k, 1) for k in self._action_keys}
+        self._history = []        # [(global_step_start, {key: np.ndarray (K, D)})]
+        self._global_step = 0
+        self._masked_keys = set()
+        self._colors = None
+        self._fig = None
+        self._canvas = None
+        self._axes = []
+
+    def _ensure_fig(self):
+        """Create the matplotlib figure on first use (called from worker thread)."""
+        if self._fig is not None or not self._action_keys:
+            return
+        self._colors = list(mpl_cm.tab10.colors)
+        n = len(self._action_keys)
+        self._fig = Figure(figsize=(self.FIG_W_IN, self.ROW_H_IN * n), dpi=self.DPI)
+        self._canvas = FigureCanvasAgg(self._fig)
+        axes = self._fig.subplots(nrows=n)
+        self._axes = [axes] if n == 1 else list(axes)
+        self._fig.subplots_adjust(left=0.08, right=0.85, top=0.97, bottom=0.04, hspace=0.55)
+        self._fig.patch.set_facecolor(self._NORMAL_BG)
+
+    def update(self, action_seq, masked_keys=None):
+        """Append raw model chunk, optionally update mask, return rendered RGB image."""
+        if masked_keys is not None:
+            self._masked_keys = set(masked_keys)
+        if not action_seq:
+            return None
+        self._ensure_fig()
+        if self._fig is None:
+            return None
+
+        K = len(action_seq)
+        arrays = {}
+        for key in self._action_keys:
+            try:
+                arrays[key] = np.stack(
+                    [np.atleast_1d(np.asarray(s[key], dtype=np.float32)) for s in action_seq],
+                    axis=0,
+                )  # (K, D)
+            except (KeyError, ValueError):
+                arrays[key] = np.zeros((K, self._dims[key]), dtype=np.float32)
+
+        self._history.append((self._global_step, arrays))
+        self._global_step += K
+        return self._render()
+
+    def _render(self):
+        total = self._global_step
+        win_start = max(0, total - self.WINDOW)
+        win_end = win_start + self.WINDOW
+        last_idx = len(self._history) - 1
+
+        for ax_idx, key in enumerate(self._action_keys):
+            ax = self._axes[ax_idx]
+            ax.cla()
+            is_masked = key in self._masked_keys
+            ax.set_facecolor(self._MASKED_BG if is_masked else self._NORMAL_BG)
+
+            for c_idx, (g_start, arrays) in enumerate(self._history):
+                chunk = arrays[key]          # (K, D)
+                K = chunk.shape[0]
+                if g_start + K <= win_start or g_start >= win_end:
+                    continue
+                is_last = (c_idx == last_idx)
+                x = np.arange(g_start, g_start + K)
+
+                if is_last:
+                    ax.axvspan(g_start, g_start + K, alpha=0.20, color="#FFD700", zorder=0)
+                if c_idx > 0:
+                    ax.axvline(g_start, color="#888888", lw=0.8, alpha=0.65, zorder=1)
+
+                alpha = 1.0 if is_last else 0.50
+                lw = 2.0 if is_last else 1.2
+                ls = "--" if is_masked else "-"
+                for dim_i in range(self._dims[key]):
+                    ax.plot(x, chunk[:, dim_i],
+                            color=self._colors[dim_i % 10],
+                            alpha=alpha, lw=lw, ls=ls, zorder=2)
+
+            ax.set_xlim(win_start, win_end)
+            ax.tick_params(labelsize=6, colors="white")
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+            ax.spines["left"].set_color("#555555")
+            ax.spines["bottom"].set_color("#555555")
+
+            label = f"{key}  [MASKED]" if is_masked else key
+            ax.set_ylabel(label, fontsize=7, rotation=0, labelpad=56, va="center",
+                          color="#ff6666" if is_masked else "white")
+            ax.yaxis.set_label_position("right")
+
+        self._canvas.draw()
+        w, h = self._canvas.get_width_height()
+        buf = self._canvas.buffer_rgba()
+        return np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)[:, :, :3].copy()
+
+    def close(self):
+        self._fig = None
+        self._canvas = None
+
+
+# ---------------------------------------------------------------------------
 # Import init_pose_from_data by file path
 # ---------------------------------------------------------------------------
 
@@ -192,7 +323,7 @@ class Ros2SpinThread(QThread):
                         self._init_pose_mod = _load_init_pose_module()
                     lw = live_row.shape[1]
                     rows = [live_row]
-                    for k in _CAM_ORDER:
+                    for k in ("ego_view",):
                         if k not in ref_frames or k not in live_by_key:
                             continue
                         cmp_row = self._init_pose_mod.build_comparison_grid(
@@ -230,10 +361,11 @@ class EpisodeWorker(QThread):
     status_update = pyqtSignal(str)
     episode_finished = pyqtSignal()
     error_occurred = pyqtSignal(str)
+    action_viz_ready = pyqtSignal(object)   # numpy uint8 RGB of action history plot
 
     def __init__(
         self, collector, sender, adapter, horizon, lang, exec_sec=1.0, use_ros=True,
-        model_video_keys=None,
+        model_video_keys=None, action_keys=None, get_action_mask=None,
     ):
         super().__init__()
         self._collector = collector
@@ -245,6 +377,8 @@ class EpisodeWorker(QThread):
         self._use_ros = use_ros
         self._model_video_keys = set(model_video_keys or [])
         self._stop_event = __import__("threading").Event()
+        self._viz = ActionHistoryViz(action_keys) if action_keys else None
+        self._get_action_mask = get_action_mask
 
     @property
     def horizon(self):
@@ -256,6 +390,17 @@ class EpisodeWorker(QThread):
 
     def stop(self):
         self._stop_event.set()
+
+    def _on_action(self, action_seq):
+        if self._viz is None:
+            return
+        try:
+            masked = self._get_action_mask() if self._get_action_mask else set()
+            rgb = self._viz.update(action_seq, masked_keys=masked)
+            if rgb is not None:
+                self.action_viz_ready.emit(rgb)
+        except Exception:
+            pass  # viz errors must not abort the episode
 
     def run(self):
         try:
@@ -276,10 +421,14 @@ class EpisodeWorker(QThread):
                 ),
                 on_status=lambda msg: self.status_update.emit(msg),
                 get_action_horizon=lambda: self._horizon,
+                on_action=self._on_action,
+                get_action_mask=self._get_action_mask,
             )
         except Exception as e:
             self.error_occurred.emit(str(e))
         finally:
+            if self._viz is not None:
+                self._viz.close()
             self.episode_finished.emit()
 
 
@@ -399,11 +548,17 @@ class EvalGuiWindow(QMainWindow):
         self._current_ckpt_config = None
         self._video_keys = []
         self._ref_frames = {}  # {cam_key: rgb_ndarray} from init pose
+        self._action_mask_checks = {}  # key -> QCheckBox; populated on checkpoint load
 
         # Dummy-mode episode context (picked via Init Pose button)
         self._dummy_dataset_path = ""
         self._dummy_episode_idx = None
         self._dummy_ckpt_config = None
+
+        # Last init pose selection (reused by Reset Pose button)
+        self._last_init_dataset_path = None
+        self._last_init_episode_idx = None
+        self._last_init_lang = None
 
         self._build_ui()
         if not self._dummy and self._default_checkpoint:
@@ -439,6 +594,10 @@ class EvalGuiWindow(QMainWindow):
         self.init_pose_btn = QPushButton("Init Pose")
         self.init_pose_btn.clicked.connect(self._on_init_pose)
         row2.addWidget(self.init_pose_btn)
+        self.reset_pose_btn = QPushButton("Reset Pose")
+        self.reset_pose_btn.clicked.connect(self._on_reset_pose)
+        self.reset_pose_btn.setEnabled(False)
+        row2.addWidget(self.reset_pose_btn)
         row2.addWidget(QLabel("Language:"))
         self.lang_input = QLineEdit()
         self.lang_input.setPlaceholderText("loaded from dataset (editable)")
@@ -462,7 +621,15 @@ class EvalGuiWindow(QMainWindow):
         )
         layout.addLayout(row3)
 
-        # Row 4: Buttons + Status
+        # Row 4: Action mask checkboxes (populated dynamically from checkpoint config)
+        self._mask_row_widget = QWidget()
+        self._mask_row_layout = QHBoxLayout(self._mask_row_widget)
+        self._mask_row_layout.setContentsMargins(0, 0, 0, 0)
+        self._mask_row_layout.addWidget(QLabel("Send:"))
+        self._mask_row_layout.addStretch(1)
+        layout.addWidget(self._mask_row_widget)
+
+        # Row 5: Buttons + Status
         row4 = QHBoxLayout()
         self.start_btn = QPushButton("Start Episode")
         self.start_btn.clicked.connect(self._on_start_episode)
@@ -484,6 +651,18 @@ class EvalGuiWindow(QMainWindow):
         self.video_label.setMinimumHeight(300)
         self.video_label.setStyleSheet("background-color: #1a1a1a;")
         layout.addWidget(self.video_label, stretch=1)
+
+        # Action history visualization panel (in a scroll area so all subplots are reachable)
+        self.viz_label = QLabel()
+        self.viz_label.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.viz_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.viz_label.setStyleSheet("background-color: #1a1a1a;")
+        self._viz_scroll = QScrollArea()
+        self._viz_scroll.setWidget(self.viz_label)
+        self._viz_scroll.setWidgetResizable(True)
+        self._viz_scroll.setMinimumHeight(300)
+        self._viz_scroll.setStyleSheet("QScrollArea { background-color: #1a1a1a; border: none; }")
+        layout.addWidget(self._viz_scroll, stretch=2)
 
     # ---- Actions ----
 
@@ -542,6 +721,9 @@ class EvalGuiWindow(QMainWindow):
         video_keys = ckpt_config["video_keys"]
         action_keys = ckpt_config["action_keys"]
 
+        # Build action mask checkboxes now so the user can configure before Start Episode
+        self._rebuild_mask_checkboxes(action_keys)
+
         if self._collector is None:
             self.status_label.setText("Status: Initializing ROS2 nodes...")
             QApplication.processEvents()
@@ -589,6 +771,9 @@ class EvalGuiWindow(QMainWindow):
 
         import random
         episode_idx = random.choice(matching_eps)
+        self._last_init_dataset_path = dataset_path
+        self._last_init_episode_idx = episode_idx
+        self._last_init_lang = picked
         self.lang_input.setText(picked)
 
         # Pause spin thread — init pose worker will spin the nodes
@@ -645,7 +830,13 @@ class EvalGuiWindow(QMainWindow):
         self._dummy_ckpt_config = ckpt_config
         self._video_keys = ckpt_config["video_keys"]
         self._current_ckpt_config = ckpt_config
+        self._last_init_dataset_path = dataset_path
+        self._last_init_episode_idx = episode_idx
+        self._last_init_lang = picked
         self.lang_input.setText(picked)
+        # Build action mask checkboxes now so the user can configure before Start Episode
+        self._rebuild_mask_checkboxes(ckpt_config["action_keys"])
+        self.reset_pose_btn.setEnabled(True)
         self.status_label.setText(
             f"Status: [DUMMY] ep {episode_idx} / {picked!r} — press Start Episode"
         )
@@ -658,6 +849,7 @@ class EvalGuiWindow(QMainWindow):
 
     def _on_manual_init_pose_finished(self):
         self.init_pose_btn.setEnabled(True)
+        self.reset_pose_btn.setEnabled(True)
         self.start_btn.setEnabled(True)
         self.status_label.setText("Status: Idle (init pose reached)")
 
@@ -672,10 +864,42 @@ class EvalGuiWindow(QMainWindow):
             self._spin_thread.frame_ready.connect(self._update_video_display)
             self._spin_thread.start()
 
+    def _on_reset_pose(self):
+        if self._last_init_dataset_path is None:
+            return
+
+        if self._dummy:
+            self.status_label.setText(
+                f"Status: [DUMMY] ep {self._last_init_episode_idx} — press Start Episode"
+            )
+            return
+
+        # Real robot: re-run InitPoseWorker with stored params, no dialog
+        if self._spin_thread:
+            self._spin_thread.pause()
+
+        self.init_pose_btn.setEnabled(False)
+        self.reset_pose_btn.setEnabled(False)
+        self.start_btn.setEnabled(False)
+        self._init_pose_worker = InitPoseWorker(
+            self._sender, self._collector, self._last_init_dataset_path,
+            video_keys=self._video_keys,
+            episode_idx=self._last_init_episode_idx,
+        )
+        self._init_pose_worker.status_update.connect(self._on_status_update)
+        self._init_pose_worker.lang_loaded.connect(self._on_lang_loaded)
+        self._init_pose_worker.ref_frames_ready.connect(self._on_ref_frames_ready)
+        self._init_pose_worker.finished.connect(self._on_manual_init_pose_finished)
+        self._init_pose_worker.error_occurred.connect(self._on_error)
+        self._init_pose_worker.start()
+        self.status_label.setText("Status: Resetting to init pose...")
+
     def _set_running_state(self, running):
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.init_pose_btn.setEnabled(not running)
+        has_last = self._last_init_dataset_path is not None
+        self.reset_pose_btn.setEnabled(not running and has_last)
         self.lang_input.setReadOnly(running)
         self.host_input.setReadOnly(running)
         self.port_input.setReadOnly(running)
@@ -698,7 +922,7 @@ class EvalGuiWindow(QMainWindow):
             return
 
         # Update slider max from checkpoint config
-        max_horizon = ckpt_config.get("action_horizon", 32)
+        max_horizon = min(ckpt_config.get("action_horizon", 32), 32)
         self.horizon_slider.setRange(1, max_horizon)
         if self.horizon_slider.value() > max_horizon:
             self.horizon_slider.setValue(max_horizon)
@@ -774,11 +998,14 @@ class EvalGuiWindow(QMainWindow):
             horizon=self.horizon_slider.value(),
             lang=self.lang_input.text(),
             model_video_keys=video_keys,
+            action_keys=action_keys,
+            get_action_mask=self._get_action_mask,
         )
         self._worker.frame_ready.connect(self._update_video_display)
         self._worker.status_update.connect(self._on_status_update)
         self._worker.episode_finished.connect(self._on_episode_finished)
         self._worker.error_occurred.connect(self._on_error)
+        self._worker.action_viz_ready.connect(self._update_viz_display)
 
         # Live horizon updates
         self.horizon_slider.valueChanged.connect(self._on_horizon_changed)
@@ -799,7 +1026,7 @@ class EvalGuiWindow(QMainWindow):
         action_keys = ckpt_config["action_keys"]
         language_key = ckpt_config["language_key"]
 
-        max_horizon = ckpt_config.get("action_horizon", 32)
+        max_horizon = min(ckpt_config.get("action_horizon", 32), 32)
         self.horizon_slider.setRange(1, max_horizon)
         if self.horizon_slider.value() > max_horizon:
             self.horizon_slider.setValue(max_horizon)
@@ -843,11 +1070,14 @@ class EvalGuiWindow(QMainWindow):
             exec_sec=0.0,
             use_ros=False,
             model_video_keys=video_keys,
+            action_keys=action_keys,
+            get_action_mask=self._get_action_mask,
         )
         self._worker.frame_ready.connect(self._update_video_display)
         self._worker.status_update.connect(self._on_status_update)
         self._worker.episode_finished.connect(self._on_episode_finished)
         self._worker.error_occurred.connect(self._on_error)
+        self._worker.action_viz_ready.connect(self._update_viz_display)
 
         self.horizon_slider.valueChanged.connect(self._on_horizon_changed)
 
@@ -864,6 +1094,13 @@ class EvalGuiWindow(QMainWindow):
 
     def _on_episode_finished(self):
         self._set_running_state(False)
+        self.viz_label.clear()
+
+        # Don't overwrite an error message that _on_error already set
+        if self.status_label.text().startswith("Status: ERROR"):
+            if self._spin_thread:
+                self._spin_thread.resume()
+            return
 
         if self._dummy:
             self._finalize_dummy_episode()
@@ -915,6 +1152,30 @@ class EvalGuiWindow(QMainWindow):
         if self._spin_thread:
             self._spin_thread.resume()
 
+    # ---- Mask checkboxes ----
+
+    def _rebuild_mask_checkboxes(self, action_keys):
+        """Recreate per-key checkboxes. Checked = send, unchecked = zero."""
+        for cb in self._action_mask_checks.values():
+            self._mask_row_layout.removeWidget(cb)
+            cb.deleteLater()
+        self._action_mask_checks.clear()
+        # Re-add the stretch after clearing
+        for i in reversed(range(self._mask_row_layout.count())):
+            item = self._mask_row_layout.itemAt(i)
+            if item and item.spacerItem():
+                self._mask_row_layout.removeItem(item)
+        for key in action_keys:
+            cb = QCheckBox(key)
+            cb.setChecked(True)
+            self._mask_row_layout.addWidget(cb)
+            self._action_mask_checks[key] = cb
+        self._mask_row_layout.addStretch(1)
+
+    def _get_action_mask(self):
+        """Returns set of action keys currently unchecked (should be zeroed before send)."""
+        return {k for k, cb in self._action_mask_checks.items() if not cb.isChecked()}
+
     # ---- Video display ----
 
     def _update_video_display(self, rgb):
@@ -931,6 +1192,21 @@ class EvalGuiWindow(QMainWindow):
             Qt.SmoothTransformation,
         )
         self.video_label.setPixmap(scaled)
+
+    def _update_viz_display(self, rgb):
+        if rgb is None:
+            return
+        h, w = rgb.shape[:2]
+        # tobytes() makes a safe copy; rgb.data (memoryview) can be GC'd before Qt renders
+        qimage = QImage(rgb.tobytes(), w, h, 3 * w, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(qimage)
+        label_w = self.viz_label.width()
+        if label_w <= 0:
+            label_w = 800
+        scaled = pixmap.scaledToWidth(label_w, Qt.SmoothTransformation)
+        # Expand the label so the full chart is visible without clipping
+        self.viz_label.setMinimumHeight(scaled.height())
+        self.viz_label.setPixmap(scaled)
 
     # ---- Cleanup ----
 

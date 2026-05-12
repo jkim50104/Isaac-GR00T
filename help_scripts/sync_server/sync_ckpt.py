@@ -11,7 +11,7 @@ LOCAL_HOSTS: tuple[str, ...] = ("lunar",)
 
 REMOTE_SERVERS: dict[str, str] = {
     "turing": "/home/jokim/projects/Isaac-GR00T/output",
-    "rosen":  "/home/jokim/project/Isaac-GR00T/output",
+    "rosen":  "/home/jokim/projects/Isaac-GR00T/output",
     "pearl":  "/home/jokim/projects/Isaac-GR00T/output",
 }
 
