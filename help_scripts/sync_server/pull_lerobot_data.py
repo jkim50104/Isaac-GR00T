@@ -35,7 +35,7 @@ DATASETS = ["jkim50104", "ACS_ROBI"]
 AI_WORKER_GATEWAY = "lunar"
 
 SERVER_PATHS = {
-    "ai_worker": "projects/physical_ai_tools/docker/huggingface/lerobot",
+    "ai_worker": "physical_ai_tools/docker/huggingface/lerobot",
     "hinton": "/data1/jokim/datasets/lerobot",
 }
 DEFAULT_SERVER_PATH = "projects/Isaac-GR00T/data"
@@ -51,9 +51,18 @@ DRY_RUN = False
 # ---------------------------
 # Helpers
 # ---------------------------
-def run(cmd: list[str]) -> None:
+def run(cmd: list[str]) -> bool:
+    """Run cmd. Returns True on success, False if rsync reports missing source (exit 23)."""
     print(">>", " ".join(cmd))
-    subprocess.check_call(cmd)
+    try:
+        subprocess.check_call(cmd)
+        return True
+    except subprocess.CalledProcessError as e:
+        # rsync exit 23: some files/attrs not transferred (e.g. remote dir missing)
+        if cmd[0] == "rsync" and e.returncode == 23:
+            print(f"[WARN] rsync exit 23 — remote path may not exist, skipping.")
+            return False
+        raise
 
 
 def ssh_lines(remote: str, cmd: str) -> list[str]:
@@ -91,7 +100,7 @@ def _rsync_exclude_args(subdir: str) -> list[str]:
     return args
 
 
-def rsync_pull(remote: str, remote_base: str, local_base: Path, exp: str, sd: str) -> None:
+def rsync_pull(remote: str, remote_base: str, local_base: Path, exp: str, sd: str) -> bool:
     src = f"{remote}:{remote_base}/{exp}/{sd}/"
     dst_path = (local_base / exp / sd).resolve()
     dst_path.mkdir(parents=True, exist_ok=True)
@@ -101,7 +110,7 @@ def rsync_pull(remote: str, remote_base: str, local_base: Path, exp: str, sd: st
     if DRY_RUN:
         cmd.append("-n")
     cmd += [src, str(dst_path) + "/"]
-    run(cmd)
+    return run(cmd)
 
 
 def sync_dataset(remote: str, source_base: str, dataset: str) -> None:
@@ -144,9 +153,14 @@ def sync_dataset(remote: str, source_base: str, dataset: str) -> None:
 
     for exp in new_exps:
         print(f"--- {exp} ---")
+        ok = True
         for sd in REQUIRED_SUBDIRS:
-            rsync_pull(remote, remote_base, local_base, exp, sd)
-        print()
+            if not rsync_pull(remote, remote_base, local_base, exp, sd):
+                print(f"[SKIP] {exp}: remote missing '{sd}', skipping remaining subdirs.")
+                ok = False
+                break
+        if ok:
+            print()
 
 
 def parse_args() -> argparse.Namespace:
