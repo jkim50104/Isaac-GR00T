@@ -78,6 +78,7 @@ class Gr00tPolicy(BasePolicy):
         *,
         device: int | str,
         strict: bool = True,
+        decode_text: bool = False,
     ):
         """Initialize the Gr00t Policy.
 
@@ -87,6 +88,8 @@ class Gr00tPolicy(BasePolicy):
             model_path: Path to the pretrained model checkpoint directory
             device: Device to run the model on (e.g., 'cuda:0', 0, 'cpu')
             strict: Whether to enforce strict input validation (default: True)
+            decode_text: If True, keep all backbone layers intact and print VLM
+                text generation results to terminal on each inference call.
         """
         # Import this to register all models.
         import gr00t.model  # noqa: F401
@@ -97,7 +100,14 @@ class Gr00tPolicy(BasePolicy):
         model_dir = Path(model_path)
 
         # Load the pretrained model and move to target device with bfloat16 precision
-        model = AutoModel.from_pretrained(model_dir)
+        if decode_text:
+            from transformers import AutoConfig
+
+            cfg = AutoConfig.from_pretrained(model_dir)
+            cfg.decode_text = True
+            model = AutoModel.from_pretrained(model_dir, config=cfg)
+        else:
+            model = AutoModel.from_pretrained(model_dir)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
         self.model = model

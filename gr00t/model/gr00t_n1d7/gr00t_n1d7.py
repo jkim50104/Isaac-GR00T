@@ -524,6 +524,7 @@ class Gr00tN1d7(PreTrainedModel):
             tune_top_llm_layers=config.tune_top_llm_layers,
             trainable_params_fp32=config.backbone_trainable_params_fp32,
             transformers_loading_kwargs=transformers_loading_kwargs,
+            decode_text=getattr(config, "decode_text", False),
         )
 
         # Initialize action head
@@ -595,6 +596,12 @@ class Gr00tN1d7(PreTrainedModel):
 
         # Forward through backbone
         backbone_outputs = self.backbone(backbone_inputs)
+
+        if self.backbone.decode_text:
+            texts = self.backbone.generate_text(backbone_inputs)
+            for i, t in enumerate(texts):
+                print(f"[VLM decode batch={i}] {t}", flush=True)
+
         action_outputs = self.action_head.get_action(backbone_outputs, action_inputs, options)
 
         return action_outputs

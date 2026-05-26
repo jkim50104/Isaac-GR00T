@@ -2,7 +2,11 @@
 # Run the GR00T inference server.
 #
 # Usage:
-#   bash help_scripts/deployment_process/run_inference_server.sh
+#   bash help_scripts/deployment_process/run_inference_server.sh [--decode-text]
+#
+# Flags:
+#   --decode-text   Keep all backbone layers intact and print VLM text output
+#                   to terminal on each inference call (slower, for inspection).
 
 # ======================== CONFIG ========================
 # Shared with deploy_robot.sh — it sources this file for MODEL_PATH/POLICY_*.
@@ -23,6 +27,12 @@ POLICY_PORT=5555
 set -euo pipefail
 source .venv/bin/activate
 
+DECODE_TEXT_FLAG=""
+for arg in "$@"; do
+    [[ "$arg" == "--decode-text" ]] && DECODE_TEXT_FLAG="--decode-text"
+done
+
 python gr00t/eval/run_gr00t_server.py \
     --embodiment-tag NEW_EMBODIMENT \
-    --model-path "$MODEL_PATH"
+    --model-path "$MODEL_PATH" \
+    $DECODE_TEXT_FLAG

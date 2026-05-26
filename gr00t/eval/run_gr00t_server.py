@@ -68,6 +68,9 @@ class ServerConfig:
     use_sim_policy_wrapper: bool = False
     """Whether to use the sim policy wrapper"""
 
+    decode_text: bool = False
+    """Print VLM text decoded output to terminal on each inference call"""
+
 
 def main(config: ServerConfig):
     config.embodiment_tag = EmbodimentTag.resolve(config.embodiment_tag)
@@ -88,6 +91,7 @@ def main(config: ServerConfig):
             model_path=config.model_path,
             device=config.device,
             strict=config.strict,
+            decode_text=config.decode_text,
         )
     elif config.dataset_path is not None:
         if config.execution_horizon is None:

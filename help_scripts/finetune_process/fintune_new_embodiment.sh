@@ -5,30 +5,26 @@ source .venv/bin/activate
 SERVER="$(hostname -s)"
 
 # Global finetune settings
-USE_WRIST_VIEW=true
-ARM_ONLY=false
+USE_WRIST_VIEW=false
+ARM_ONLY=true
 ACTION_REP=REL  # "ABS" or "REL"
 
 # ---- args ----
 SIM_MODE=false
 DEBUG_MODE=false
+OVERRIDE_OUTPUT_DIR=""
+OVERRIDE_MAX_STEPS=""
 POSITIONAL=()
-for arg in "$@"; do
-  case "$arg" in
-    --sim)   SIM_MODE=true ;;
-    --debug) DEBUG_MODE=true ;;
-    *)       POSITIONAL+=("$arg") ;;
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --sim)        SIM_MODE=true; shift ;;
+    --debug)      DEBUG_MODE=true; shift ;;
+    --output-dir) OVERRIDE_OUTPUT_DIR="$2"; shift 2 ;;
+    --max-steps)  OVERRIDE_MAX_STEPS="$2"; shift 2 ;;
+    *)            POSITIONAL+=("$1"); shift ;;
   esac
 done
 set -- "${POSITIONAL[@]}"
-
-if [[ $# -lt 1 ]]; then
-  echo "Usage: $0 [--sim] <task_name> [cuda_visible_devices]"
-  echo "Example: $0 pick_item               # real data, GPUs default to 0,1,2,3"
-  echo "Example: $0 pick_item 0             # single GPU"
-  echo "Example: $0 --sim table_pnp         # sim data (ACS_ROBI)"
-  exit 1
-fi
 
 if [[ "${SIM_MODE}" == "true" ]]; then
   DATASET_PREFIX="sim_ffw_sg2_"
@@ -36,6 +32,18 @@ if [[ "${SIM_MODE}" == "true" ]]; then
 else
   DATASET_PREFIX="ffw_sg2_rev1_"
   DATA_ROOT="./data/jkim50104"
+fi
+
+if [[ $# -lt 1 ]]; then
+  echo "Usage: $0 [--sim] [--output-dir <dir>] [--max-steps <n>] <task_name> [cuda_visible_devices]"
+  echo "Example: $0 pick_item               # real data, GPUs default to 0,1,2,3"
+  echo "Example: $0 pick_item 0             # single GPU"
+  echo "Example: $0 --sim table_pnp         # sim data (ACS_ROBI)"
+  echo "Example: $0 --sim table_pnp --output-dir ./output/v1.7/sim_.../20260525_B2016_REL_AO --max-steps 6000  # resume with more steps"
+  echo ""
+  echo "Available tasks (${DATA_ROOT}):"
+  ls -1 "${DATA_ROOT}/" 2>/dev/null | grep "^${DATASET_PREFIX}" | sed "s/^${DATASET_PREFIX}/  /" || echo "  (none found)"
+  exit 1
 fi
 
 TASK_NAME="$1"
@@ -53,19 +61,23 @@ case "${SERVER}" in
     ulimit -n 65535 || true
     GPU_VRAM=82
     PER_GPU_BATCH=336   # 4x NVIDIA A100 ~82GB
+    NUM_WORKERS=8
     ;;
   *turing*|*rosenblatt*)
     GPU_VRAM=50
     PER_GPU_BATCH=80    # 4x NVIDIA RTX A6000 ~50GB
+    NUM_WORKERS=4
     ;;
   *lunar*)
     GPU_VRAM=98
     PER_GPU_BATCH=360   # 1x NVIDIA RTX PRO 6000 Blackwell ~98GB
+    NUM_WORKERS=4
     ;;
   *)
     echo "Unknown server '${SERVER}', using conservative defaults."
     GPU_VRAM=50
     PER_GPU_BATCH=64
+    NUM_WORKERS=4
     ;;
 esac
 
@@ -73,7 +85,7 @@ NUM_GPUS="${DEVICE_COUNT}"
 
 # Scale per-GPU batch when no wrist view (one fewer camera = less memory per sample)
 if [[ "${USE_WRIST_VIEW}" == "false" ]]; then
-  PER_GPU_BATCH=$(( PER_GPU_BATCH * 9 / 5 ))
+  PER_GPU_BATCH=$(( PER_GPU_BATCH * 3 / 2 ))
 fi
 
 # Global batch scales with GPU count; steps scale inversely — total samples seen stays constant
@@ -86,6 +98,8 @@ N_CHECKPOINTS=6
 SAVE_STEPS=$(( TOTAL_SAMPLES / BATCH_SIZE / N_CHECKPOINTS ))
 MAX_STEPS=$(( SAVE_STEPS * N_CHECKPOINTS ))
 
+# Apply overrides
+[[ -n "${OVERRIDE_MAX_STEPS}" ]] && MAX_STEPS="${OVERRIDE_MAX_STEPS}"
 
 BASE_MODEL="nvidia/GR00T-N1.7-3B"
 DATASET_PATH="${DATA_ROOT}/${DATASET_NAME}"
@@ -112,6 +126,7 @@ if [[ "${DEBUG_MODE}" == "true" ]]; then
   HYPER_PARAMS="DEBUG_${HYPER_PARAMS}"
 fi
 OUTPUT_DIR="./output/v1.7/${DATASET_NAME}/${DATE}_${HYPER_PARAMS}"
+[[ -n "${OVERRIDE_OUTPUT_DIR}" ]] && OUTPUT_DIR="${OVERRIDE_OUTPUT_DIR}"
 
 # make flags visible to all torchrun ranks
 export GR00T_ARM_ONLY="${ARM_ONLY}"
@@ -151,4 +166,4 @@ torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}" \
   --use-wandb \
   --global-batch-size "${BATCH_SIZE}" \
   --color-jitter-params brightness 0.3 contrast 0.4 saturation 0.5 hue 0.08 \
-  --dataloader-num-workers 4
+  --dataloader-num-workers "${NUM_WORKERS}"

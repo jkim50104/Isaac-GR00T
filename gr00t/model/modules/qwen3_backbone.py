@@ -44,6 +44,7 @@ class Qwen3Backbone(torch.nn.Module):
         tune_top_llm_layers: int = 0,
         trainable_params_fp32: bool = False,
         transformers_loading_kwargs: dict = {},
+        decode_text: bool = False,
     ):
         """
         Qwen3Backbone is to generate n_queries to represent the future action hidden states.
@@ -83,9 +84,16 @@ class Qwen3Backbone(torch.nn.Module):
             **transformers_loading_kwargs,
         ).eval()
 
-        # needed since we don't use these layers. Also saves compute
-        while len(self.model.language_model.layers) > select_layer:
-            self.model.language_model.layers.pop(-1)
+        self.decode_text = decode_text
+        if decode_text:
+            # Keep all layers intact so .generate() works correctly.
+            from transformers import AutoProcessor
+
+            self.processor = AutoProcessor.from_pretrained(model_name)
+        else:
+            # needed since we don't use these layers. Also saves compute
+            while len(self.model.language_model.layers) > select_layer:
+                self.model.language_model.layers.pop(-1)
 
         self.select_layer = select_layer
         self.set_trainable_parameters(tune_llm, tune_visual, tune_top_llm_layers)
@@ -131,6 +139,16 @@ class Qwen3Backbone(torch.nn.Module):
                 self.model.language_model.eval()
             if self.model.visual and not self.tune_visual:
                 self.model.visual.eval()
+
+    def generate_text(self, vl_input: dict) -> list[str]:
+        """Generate text from VLM input. Only valid when decode_text=True."""
+        keys = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
+        inputs = {k: vl_input[k] for k in keys if k in vl_input}
+        with torch.no_grad():
+            output_ids = self.model.generate(**inputs, max_new_tokens=128)
+        input_len = inputs["input_ids"].shape[1]
+        generated = output_ids[:, input_len:]
+        return self.processor.batch_decode(generated, skip_special_tokens=True)
 
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
