@@ -144,8 +144,18 @@ class Qwen3Backbone(torch.nn.Module):
         """Generate text from VLM input. Only valid when decode_text=True."""
         keys = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
         inputs = {k: vl_input[k] for k in keys if k in vl_input}
-        with torch.no_grad():
-            output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
+
+        # bfloat16 produces degenerate logits during autoregressive generation.
+        # Upcast to float32 for the generate call only, then restore.
+        orig_dtype = next(self.model.parameters()).dtype
+        self.model.float()
+        inputs_f32 = {k: v.float() if v.is_floating_point() else v for k, v in inputs.items()}
+        try:
+            with torch.no_grad():
+                output_ids = self.model.generate(**inputs_f32, max_new_tokens=128, do_sample=False)
+        finally:
+            self.model.to(dtype=orig_dtype)
+
         input_len = inputs["input_ids"].shape[1]
         generated = output_ids[:, input_len:]
         return self.processor.batch_decode(generated, skip_special_tokens=True)
