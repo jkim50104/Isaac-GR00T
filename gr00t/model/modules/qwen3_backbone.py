@@ -160,8 +160,21 @@ class Qwen3Backbone(torch.nn.Module):
             [inputs["attention_mask"], torch.ones_like(gen_prompt)], dim=1
         )
 
-        with torch.no_grad():
-            output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
+        # Cosmos-Reason2 uses float16 for inference (not bfloat16) — generation
+        # over all 28 layers accumulates enough numerical error in bfloat16 to
+        # produce degenerate logits. float16 has better mantissa precision and
+        # is supported by flash attention.
+        orig_dtype = next(self.model.parameters()).dtype
+        self.model.to(dtype=torch.float16)
+        inputs = {
+            k: v.to(dtype=torch.float16) if v.is_floating_point() else v
+            for k, v in inputs.items()
+        }
+        try:
+            with torch.no_grad():
+                output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
+        finally:
+            self.model.to(dtype=orig_dtype)
 
         input_len = inputs["input_ids"].shape[1]
         generated = output_ids[:, input_len:]
