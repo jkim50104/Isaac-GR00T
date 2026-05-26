@@ -33,6 +33,15 @@ from gr00t.data.types import MessageType, ModalityConfig, VLAStepData
 
 from .policy import BasePolicy, PolicyWrapper
 
+_DECODE_TEXT_PROMPT_TEMPLATE = (
+    'You are controlling a robot with a left arm and a right arm. '
+    'The task is: "{instruction}". '
+    'Looking at the current visual scene, describe the robot\'s immediate next '
+    'physical action to progress toward completing this task. Specify which arm '
+    '(left, right, or both), what motion it makes, and the target object or '
+    'direction. One action only. Be concise and action-oriented.'
+)
+
 
 def _rec_to_dtype(x: Any, dtype: torch.dtype) -> Any:
     """Recursively convert all floating point tensors in a nested structure to the given dtype.
@@ -178,6 +187,7 @@ class Gr00tPolicy(BasePolicy):
         assert len(language_keys) >= 1, "At least one language key is required"
         assert len(language_delta_indices) == 1, "Only one language delta index is supported"
         self.language_key = language_keys[0]
+        self.decode_text = decode_text
 
     def _unbatch_observation(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         """Unbatch a batched observation into a list of single observations.
@@ -211,11 +221,17 @@ class Gr00tPolicy(BasePolicy):
         Returns:
             VLAStepData object ready for processor input
         """
+        raw = observation["language"][self.language_key][0]
+        text = (
+            _DECODE_TEXT_PROMPT_TEMPLATE.format(instruction=raw)
+            if self.decode_text
+            else raw
+        )
         return VLAStepData(
             images=observation["video"],
             states=observation["state"],
             actions={},  # No ground truth actions during inference
-            text=observation["language"][self.language_key][0],
+            text=text,
             embodiment=self.embodiment_tag,
         )
 
