@@ -143,22 +143,31 @@ class Qwen3Backbone(torch.nn.Module):
     def generate_text(self, vl_input: dict) -> list[str]:
         """Generate text from VLM input. Only valid when decode_text=True."""
         keys = ["input_ids", "attention_mask", "pixel_values", "image_grid_thw"]
-        inputs = {k: vl_input[k] for k in keys if k in vl_input}
+        inputs = {k: vl_input[k].clone() for k in keys if k in vl_input}
 
-        # bfloat16 produces degenerate logits during autoregressive generation.
-        # Upcast to float32 for the generate call only, then restore.
-        orig_dtype = next(self.model.parameters()).dtype
-        self.model.float()
-        inputs_f32 = {k: v.float() if v.is_floating_point() else v for k, v in inputs.items()}
-        try:
-            with torch.no_grad():
-                output_ids = self.model.generate(**inputs_f32, max_new_tokens=128, do_sample=False)
-        finally:
-            self.model.to(dtype=orig_dtype)
+        # GR00T preprocessing uses add_generation_prompt=False (feature extraction).
+        # For generation we need the <|im_start|>assistant\n tokens appended so the
+        # model knows to produce a response rather than continuing the user turn.
+        gen_prompt_ids = self.processor.tokenizer.encode(
+            "<|im_start|>assistant\n", add_special_tokens=False
+        )
+        gen_prompt = torch.tensor(
+            [gen_prompt_ids] * inputs["input_ids"].shape[0],
+            device=inputs["input_ids"].device,
+        )
+        inputs["input_ids"] = torch.cat([inputs["input_ids"], gen_prompt], dim=1)
+        inputs["attention_mask"] = torch.cat(
+            [inputs["attention_mask"], torch.ones_like(gen_prompt)], dim=1
+        )
+
+        with torch.no_grad():
+            output_ids = self.model.generate(**inputs, max_new_tokens=128, do_sample=False)
 
         input_len = inputs["input_ids"].shape[1]
         generated = output_ids[:, input_len:]
-        return self.processor.batch_decode(generated, skip_special_tokens=True)
+        return self.processor.batch_decode(
+            generated, skip_special_tokens=True, clean_up_tokenization_spaces=False
+        )
 
     def prepare_input(self, batch: dict) -> BatchFeature:
         return BatchFeature(data=batch)
