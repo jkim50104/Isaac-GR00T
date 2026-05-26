@@ -110,6 +110,10 @@ class Gr00tPolicy(BasePolicy):
             model = AutoModel.from_pretrained(model_dir)
         model.eval()  # Set model to evaluation mode
         model.to(device=device, dtype=torch.bfloat16)
+        if decode_text:
+            # Restore happens after .to() so that the target params are
+            # already materialized off the meta device.
+            model.backbone.restore_decode_text_weights()
         self.model = model
 
         # Load the processor for input/output transformation.

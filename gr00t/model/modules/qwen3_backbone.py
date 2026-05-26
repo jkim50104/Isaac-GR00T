@@ -90,6 +90,7 @@ class Qwen3Backbone(torch.nn.Module):
             from transformers import AutoProcessor
 
             self.processor = AutoProcessor.from_pretrained(model_name)
+            self._decode_text_model_name = model_name
         else:
             # needed since we don't use these layers. Also saves compute
             while len(self.model.language_model.layers) > select_layer:
@@ -139,6 +140,37 @@ class Qwen3Backbone(torch.nn.Module):
                 self.model.language_model.eval()
             if self.model.visual and not self.tune_visual:
                 self.model.visual.eval()
+
+    def restore_decode_text_weights(self):
+        """Reload Cosmos weights for layers[select_layer:] after the GR00T
+        checkpoint's from_pretrained re-initialized them to random values.
+
+        GR00T checkpoints only contain layers[0:select_layer]. When loaded
+        via AutoModel.from_pretrained, HF's _load_pretrained_model calls
+        _init_weights() on every parameter missing from the state_dict —
+        scrambling the Cosmos weights for layers[select_layer:] and
+        producing NaN logits during .generate(). This method reloads
+        those layers from the original Cosmos checkpoint.
+
+        Must be called AFTER the model has been moved off the meta device
+        (i.e. after .to(device, dtype)). No-op when decode_text=False."""
+        if not self.decode_text:
+            return
+        if not hasattr(self, "_decode_text_model_name"):
+            return
+        target_layers = self.model.language_model.layers
+        target_dtype = next(target_layers[0].parameters()).dtype
+        fresh = Qwen3VLForConditionalGeneration.from_pretrained(
+            self._decode_text_model_name, dtype=target_dtype
+        )
+        for i in range(self.select_layer, len(fresh.model.language_model.layers)):
+            target_layers[i].load_state_dict(
+                fresh.model.language_model.layers[i].state_dict()
+            )
+        del fresh
+        del self._decode_text_model_name
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def generate_text(self, vl_input: dict) -> list[str]:
         """Generate text from VLM input. Only valid when decode_text=True."""
