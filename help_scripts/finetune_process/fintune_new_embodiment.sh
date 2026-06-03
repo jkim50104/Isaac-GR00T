@@ -5,7 +5,7 @@ source .venv/bin/activate
 SERVER="$(hostname -s)"
 
 # Global finetune settings
-USE_WRIST_VIEW=false
+USE_WRIST_VIEW=true
 ARM_ONLY=true
 ACTION_REP=REL  # "ABS" or "REL"
 
@@ -90,7 +90,7 @@ fi
 
 # Global batch scales with GPU count; steps scale inversely — total samples seen stays constant
 BATCH_SIZE=$(( PER_GPU_BATCH * NUM_GPUS ))
-TOTAL_SAMPLES=7680000   # fixed training budget (30000 steps × 256 ref batch)
+TOTAL_SAMPLES=$(( 7680000 * 1 ))   # fixed training budget (30000 steps × 256 ref batch)
 if [[ "${DEBUG_MODE}" == "true" ]]; then
   TOTAL_SAMPLES=$(( TOTAL_SAMPLES * 10 ))
 fi
