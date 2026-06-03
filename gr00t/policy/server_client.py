@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections import deque
 from dataclasses import dataclass
 import io
+import time
 from typing import Any, Callable
 
 import msgpack
@@ -86,6 +88,8 @@ class PolicyServer:
         self.socket.bind(f"tcp://{host}:{port}")
         self._endpoints: dict[str, EndpointHandler] = {}
         self.api_token = api_token
+        self._infer_count = 0
+        self._infer_times: deque = deque(maxlen=50)
 
         # Register the ping endpoint by default
         self.register_endpoint("ping", self._handle_ping, requires_input=False)
@@ -150,11 +154,27 @@ class PolicyServer:
                     raise ValueError(f"Unknown endpoint: {endpoint}")
 
                 handler = self._endpoints[endpoint]
-                result = (
-                    handler.handler(**request.get("data", {}))
-                    if handler.requires_input
-                    else handler.handler()
-                )
+                if endpoint == "get_action":
+                    t0 = time.perf_counter()
+                    result = handler.handler(**request.get("data", {}))
+                    elapsed_ms = (time.perf_counter() - t0) * 1000
+                    self._infer_count += 1
+                    self._infer_times.append(elapsed_ms)
+                    avg_ms = sum(self._infer_times) / len(self._infer_times)
+                    _tty = sys.stdout.isatty()
+                    print(
+                        f"\r  calls {self._infer_count:>6}  |"
+                        f"  avg {avg_ms:>6.1f} ms  |"
+                        f"  {1000.0 / avg_ms:>5.1f} Hz   ",
+                        end="" if _tty else "\n",
+                        flush=True,
+                    )
+                else:
+                    result = (
+                        handler.handler(**request.get("data", {}))
+                        if handler.requires_input
+                        else handler.handler()
+                    )
                 self.socket.send(MsgSerializer.to_bytes(result))
             except Exception as e:
                 print(f"Error in server: {e}")
